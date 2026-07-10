@@ -5,12 +5,13 @@ import random
 import secrets
 import hashlib
 import threading
-import signal  # Защита сокетов при прерывании процесса
+import signal  
 import sys
 import numpy as np
 import telebot
 from telebot import types
 from telebot import apihelper
+from PIL import Image  # Используем Pillow для пиксель-в-пиксель экспорта и SSAA-фильтрации
 
 # Отключаем GUI для Matplotlib
 import matplotlib
@@ -18,7 +19,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-# --- Глобальные таймауты для стабильного соединения на домашнем ПК ---
+# --- Глобальные таймауты для стабильного соединения ---
 apihelper.CONNECT_TIMEOUT = 90
 apihelper.READ_TIMEOUT = 90
 
@@ -50,7 +51,7 @@ except ImportError:
 log_lock = threading.Lock()
 
 def log(level, section, message):
-    """Выводит структурированный, легкий лог в консоль."""
+    """Выводит структурированный лог в консоль."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     thread_name = threading.current_thread().name
     with log_lock:
@@ -200,7 +201,6 @@ def load_phrases():
         log("ERROR", "SYSTEM", f"Ошибка при чтении {PHRASES_FILE}: {e}")
         return DEFAULT_PHRASES
 
-# Загружаем фразы один раз при инициализации скрипта
 bot_phrases = load_phrases()
 
 def get_random_phrase():
@@ -234,6 +234,9 @@ def get_classic_colormap():
         (0.92, '#ffaa00'), (0.97, '#ff3700'), (1.0, '#000000')
     ]
     return LinearSegmentedColormap.from_list("DynamicMap", colors, N=2048)
+
+# Инициализируем палитру один раз на старте
+CLASSIC_CMAP = get_classic_colormap()
 
 # --- Декодирование процедурной грамматики ---
 class EntropyDecoder:
@@ -324,15 +327,17 @@ def rpn_to_str(rpn):
             stack.append(f"({arg1}{op_syms[op]}{arg2})")
     return stack[0] if stack else "Z"
 
-# --- Вычислительные интерпретаторы (PyTorch / CUDA и NumPy) ---
-def evaluate_rpn_pytorch(rpn, Z, C, device):
+
+# --- Вычислительные интерпретаторы с поддержкой динамической точности ---
+def evaluate_rpn_pytorch(rpn, Z, C, device, use_double=False):
     stack = []
+    # Определяем рабочий тип комплексных чисел на основе флага точности
+    torch_complex = torch.complex128 if use_double else torch.complex64
     for t_type, op, val in rpn:
         if t_type == 0:
             if op == VAR_Z: stack.append(Z)
             elif op == VAR_C: stack.append(C)
-            # Перевод констант на комплексные числа одинарной точности (complex64)
-            elif op == CONST: stack.append(torch.tensor(val, dtype=torch.complex64, device=device))
+            elif op == CONST: stack.append(torch.tensor(val, dtype=torch_complex, device=device))
         elif t_type == 1:
             A = stack.pop()
             if op == OP_SIN:
@@ -374,69 +379,17 @@ def evaluate_rpn_pytorch(rpn, Z, C, device):
     Z_next = stack[0]
     anomalies = torch.isnan(Z_next) | torch.isinf(Z_next)
     if torch.any(anomalies):
-        Z_next = torch.where(anomalies, torch.tensor(1e5 + 0j, dtype=torch.complex64, device=device), Z_next)
+        Z_next = torch.where(anomalies, torch.tensor(1e5 + 0j, dtype=torch_complex, device=device), Z_next)
     return Z_next
 
-
-def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, device):
-    # Замена float64 на float32
-    x = torch.linspace(xmin, xmax, width, dtype=torch.float32, device=device)
-    y = torch.linspace(ymin, ymax, height, dtype=torch.float32, device=device)
-    X, Y = torch.meshgrid(x, y, indexing='xy')
-    C = torch.complex(X, Y)
-    
-    if is_julia:
-        Z = C.clone()
-        C_param = torch.tensor(c, dtype=torch.complex64, device=device)
-    else:
-        Z = torch.zeros_like(C)
-        C_param = C
-        
-    img = torch.zeros(C.shape, dtype=torch.float32, device=device)
-    mask = torch.ones(C.shape, dtype=torch.bool, device=device)
-    
-    Z_prev, Z_prev2 = torch.zeros_like(C), torch.zeros_like(C)
-    R_esc_sq, eps_att_sq = 1e8, 1e-12
-    
-    with torch.no_grad():
-        for i in range(max_iter):
-            Z_next = evaluate_rpn_pytorch(rpn, Z, C_param, device)
-            mag_sq = Z_next.real**2 + Z_next.imag**2
-            escaped = mag_sq > R_esc_sq
-            
-            dist_prev_sq = (Z_next.real - Z_prev.real)**2 + (Z_next.imag - Z_prev.imag)**2
-            dist_prev2_sq = (Z_next.real - Z_prev2.real)**2 + (Z_next.imag - Z_prev2.imag)**2
-            attracted = (dist_prev_sq < eps_att_sq) | (dist_prev2_sq < eps_att_sq)
-            
-            finished = escaped | attracted
-            newly_finished = finished & mask
-            
-            if torch.any(newly_finished):
-                z_mag = torch.clamp(torch.sqrt(mag_sq[newly_finished]), min=1.001)
-                z_prev_mag = torch.clamp(torch.sqrt(Z.real**2 + Z.imag**2)[newly_finished], min=1.001)
-                alpha = torch.clamp(torch.log(z_mag) / (torch.log(z_prev_mag) + 1e-20), min=1.1)
-                nu = torch.log(torch.log(z_mag)) / torch.log(alpha)
-                
-                esc_subset = escaped[newly_finished]
-                val = torch.where(esc_subset, i + 1.0 - nu, torch.tensor(float(i), dtype=torch.float32, device=device))
-                img[newly_finished] = val
-                
-            mask = mask & ~finished
-            if not torch.any(mask):
-                break
-                
-            Z_prev2, Z_prev, Z = Z_prev.clone(), Z.clone(), Z_next
-            
-        img[mask] = max_iter
-    return img.cpu().numpy(), x.cpu().numpy(), y.cpu().numpy()
-
-def evaluate_rpn_numpy(rpn, Z, C):
+def evaluate_rpn_numpy(rpn, Z, C, use_double=False):
     stack = []
+    complex_dtype = np.complex128 if use_double else np.complex64
     for t_type, op, val in rpn:
         if t_type == 0:
             if op == VAR_Z: stack.append(Z)
             elif op == VAR_C: stack.append(C)
-            elif op == CONST: stack.append(val)
+            elif op == CONST: stack.append(complex_dtype(val))
         elif t_type == 1:
             A = stack.pop()
             with np.errstate(invalid='ignore', over='ignore'):
@@ -480,24 +433,28 @@ def evaluate_rpn_numpy(rpn, Z, C):
     Z_next = stack[0]
     anomalies = np.isnan(Z_next) | np.isinf(Z_next)
     if np.any(anomalies):
-        Z_next = np.where(anomalies, 1e5 + 0j, Z_next)
+        Z_next = np.where(anomalies, complex_dtype(1e5 + 0j), Z_next)
     return Z_next
 
+
 # --- Итераторы сеток ---
-def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, device):
-    x = torch.linspace(xmin, xmax, width, dtype=torch.float64, device=device)
-    y = torch.linspace(ymin, ymax, height, dtype=torch.float64, device=device)
+def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, device, use_double=False):
+    torch_dtype = torch.float64 if use_double else torch.float32
+    torch_complex = torch.complex128 if use_double else torch.complex64
+
+    x = torch.linspace(xmin, xmax, width, dtype=torch_dtype, device=device)
+    y = torch.linspace(ymin, ymax, height, dtype=torch_dtype, device=device)
     X, Y = torch.meshgrid(x, y, indexing='xy')
     C = torch.complex(X, Y)
     
     if is_julia:
         Z = C.clone()
-        C_param = torch.tensor(c, dtype=torch.complex128, device=device)
+        C_param = torch.tensor(c, dtype=torch_complex, device=device)
     else:
         Z = torch.zeros_like(C)
         C_param = C
         
-    img = torch.zeros(C.shape, dtype=torch.float64, device=device)
+    img = torch.zeros(C.shape, dtype=torch_dtype, device=device)
     mask = torch.ones(C.shape, dtype=torch.bool, device=device)
     
     Z_prev, Z_prev2 = torch.zeros_like(C), torch.zeros_like(C)
@@ -505,7 +462,7 @@ def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_i
     
     with torch.no_grad():
         for i in range(max_iter):
-            Z_next = evaluate_rpn_pytorch(rpn, Z, C_param, device)
+            Z_next = evaluate_rpn_pytorch(rpn, Z, C_param, device, use_double)
             mag_sq = Z_next.real**2 + Z_next.imag**2
             escaped = mag_sq > R_esc_sq
             
@@ -523,7 +480,7 @@ def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_i
                 nu = torch.log(torch.log(z_mag)) / torch.log(alpha)
                 
                 esc_subset = escaped[newly_finished]
-                val = torch.where(esc_subset, i + 1.0 - nu, torch.tensor(float(i), dtype=torch.float64, device=device))
+                val = torch.where(esc_subset, i + 1.0 - nu, torch.tensor(float(i), dtype=torch_dtype, device=device))
                 img[newly_finished] = val
                 
             mask = mask & ~finished
@@ -535,14 +492,17 @@ def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_i
         img[mask] = max_iter
     return img.cpu().numpy(), x.cpu().numpy(), y.cpu().numpy()
 
-def compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c):
-    x = np.linspace(xmin, xmax, width)
-    y = np.linspace(ymin, ymax, height)
+def compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double=False):
+    dtype = np.float64 if use_double else np.float32
+    complex_dtype = np.complex128 if use_double else np.complex64
+
+    x = np.linspace(xmin, xmax, width, dtype=dtype)
+    y = np.linspace(ymin, ymax, height, dtype=dtype)
     X, Y = np.meshgrid(x, y)
-    C = X + 1j * Y
+    C = (X + 1j * Y).astype(complex_dtype)
     
     Z = C.copy() if is_julia else np.zeros_like(C)
-    C_param = c if is_julia else C
+    C_param = np.array(c, dtype=complex_dtype) if is_julia else C
     
     img = np.zeros(C.shape, dtype=float)
     mask = np.ones(C.shape, dtype=bool)
@@ -551,7 +511,7 @@ def compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_ite
     R_esc_sq, eps_att_sq = 1e8, 1e-12
     
     for i in range(max_iter):
-        Z_next = evaluate_rpn_numpy(rpn, Z, C_param)
+        Z_next = evaluate_rpn_numpy(rpn, Z, C_param, use_double)
         mag_sq = np.real(Z_next)**2 + np.imag(Z_next)**2
         escaped = mag_sq > R_esc_sq
         
@@ -579,17 +539,18 @@ def compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_ite
     img[mask] = max_iter
     return img, x, y
 
-def safe_compute_grid(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c):
+def safe_compute_grid(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double=False):
     if HAS_TORCH and DEVICE.type == 'cuda':
         try:
             return compute_procedural_grid_pytorch(
-                xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, DEVICE
+                xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, DEVICE, use_double
             )
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 torch.cuda.empty_cache()
                 log("ERROR", "DEVICE", "Переполнение видеопамяти CUDA. Переход на CPU.")
-    return compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c)
+    return compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double)
+
 
 # --- Навигация и контроль качества ---
 def find_boundary_point_v2(img, x, y, max_iter, rng):
@@ -614,7 +575,7 @@ def find_boundary_point_v2(img, x, y, max_iter, rng):
 def find_highly_decorated_c_v2(rpn, rng):
     xmin, xmax, ymin, ymax = -2.0, 2.0, -2.0, 2.0
     for _ in range(5):  
-        img, x, y = safe_compute_grid(xmin, xmax, ymin, ymax, 150, 150, 100, rpn, False, 0j)
+        img, x, y = safe_compute_grid(xmin, xmax, ymin, ymax, 150, 150, 100, rpn, False, 0j, use_double=False)
         target_x, target_y = find_boundary_point_v2(img, x, y, 100, rng)
         range_x, range_y = (xmax - xmin)/2.5, (ymax - ymin)/2.5
         xmin, xmax = target_x - range_x/2, target_x + range_x/2
@@ -656,8 +617,47 @@ def check_aesthetic_quality(processed_img):
     if len(unique_vals) < 20: return False
     return True
 
-# --- Ультимативный генератор фракталов с информированием о прогрессе ---
-def generate_fractal_pipeline(quality_res=1200, steps=10, progress_callback=None):
+
+# --- Высококачественный пиксель-в-пиксель экспорт напрямую через PIL (Без Matplotlib) ---
+def export_to_buffers_pil(processed_img, cmap=None, target_res=1600):
+    """
+    Применяет палитру напрямую к массиву NumPy и возвращает два буфера:
+    1. Буфер JPEG (оптимизирован для быстрого inline-просмотра)
+    2. Буфер PNG (без сжатия, pixel-perfect для детального зума)
+    """
+    if cmap is None:
+        cmap = CLASSIC_CMAP
+        
+    body_mask = np.isnan(processed_img)
+    clean_img = np.nan_to_num(processed_img, nan=0.0)
+    
+    # Получаем RGBA массив float (0.0 - 1.0)
+    rgba_img = cmap(clean_img)
+    rgba_img[body_mask] = [0.0, 0.0, 0.0, 1.0] # Тело фрактала красим в черный
+    
+    # Переводим в uint8
+    rgb_img = (rgba_img[:, :, :3] * 255.0).astype(np.uint8)
+    img_pil = Image.fromarray(rgb_img)
+    
+    # SSAA Даунсамплинг (Lanczos сглаживание)
+    if img_pil.width > target_res:
+        img_pil = img_pil.resize((target_res, target_res), Image.Resampling.LANCZOS)
+        
+    # Экспорт JPEG
+    buf_jpeg = io.BytesIO()
+    img_pil.save(buf_jpeg, format='JPEG', quality=90, optimize=True)
+    buf_jpeg.seek(0)
+    
+    # Экспорт оригинального PNG без потерь
+    buf_png = io.BytesIO()
+    img_pil.save(buf_png, format='PNG')
+    buf_png.seek(0)
+    
+    return buf_jpeg, buf_png
+
+
+# --- Оптимизированный генератор фракталов ---
+def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None):
     rng = random.Random(secrets.randbits(128))
     seed_int = rng.randint(0, 2**128 - 1)
     
@@ -685,65 +685,67 @@ def generate_fractal_pipeline(quality_res=1200, steps=10, progress_callback=None
         if progress_callback:
             progress_callback(f"🪐 Позиционирование зума (Шаг {step}/{steps})...")
         current_max_iter = 120 + step * 60
-        img, x, y = safe_compute_grid(xmin, xmax, ymin, ymax, 250, 250, current_max_iter, rpn_tokens, is_julia, c_val)
+        # Для шагов зума всегда используем быстрый float32
+        img, x, y = safe_compute_grid(
+            xmin, xmax, ymin, ymax, 250, 250, current_max_iter, rpn_tokens, is_julia, c_val, use_double=False
+        )
         target_x, target_y = find_boundary_point_v2(img, x, y, current_max_iter, rng)
         range_x, range_y = (xmax - xmin)/2.5, (ymax - ymin)/2.5
         xmin, xmax = target_x - range_x/2, target_x + range_x/2
         ymin, ymax = target_y - range_y/2, target_y + range_y/2
         
     final_max_iter = 500
-
-    # --- НАЧАЛО ОПТИМИЗАЦИИ: Быстрое превью для ранней фильтрации ---
+    
+    # --- БЫСТРЫЙ ПРЕВЬЮ ПАСС: Ранняя отбраковка (200x200, float32) ---
     if progress_callback:
-        progress_callback("⚡ Анализ эстетической структуры кандидата...")
-        
+        progress_callback("⚡ Проверка эстетического потенциала...")
+    
     preview_res = 200
     preview_img, _, _ = safe_compute_grid(
-        xmin, xmax, ymin, ymax, preview_res, preview_res, final_max_iter, rpn_tokens, is_julia, c_val
+        xmin, xmax, ymin, ymax, preview_res, preview_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=False
     )
     preview_processed = apply_adaptive_tonemapping(preview_img, final_max_iter)
     
     if not check_aesthetic_quality(preview_processed):
         log("WARN", "QUALITY", "Фрактал отклонён на стадии быстрого превью.")
-        return None, None
-    # --- КОНЕЦ ОПТИМИЗАЦИИ ---
-
-    log("COMPUTE", "GRID", f"Кандидат одобрен. Начат рендеринг высокого разрешения {quality_res}x{quality_res}")
+        return None, None, None
+        
+    # --- ФИНАЛЬНЫЙ РЕНДЕР (Адаптивные параметры качества) ---
+    # Если запущены на GPU, ставим повышенное качество и SSAA-фильтрацию. На CPU снижаем, чтобы не зависать.
+    if HAS_TORCH and DEVICE.type == 'cuda':
+        target_res = quality_res # 1600x1600
+        ssaa_factor = 1.5       # Рендерим 2400x2400
+    else:
+        target_res = 1200       # Безопасное разрешение для CPU
+        ssaa_factor = 1.0       # Без SSAA во избежание таймаутов
+        
+    render_res = int(target_res * ssaa_factor)
     
+    log("COMPUTE", "GRID", f"Начат рендеринг высокого разрешения {render_res}x{render_res} (Double Precision)...")
     if progress_callback:
-        progress_callback(f"🧬 Рендеринг в разрешении {quality_res}x{quality_res}...")
+        progress_callback(f"🧬 Рендеринг фрактала высокой точности ({target_res}x{target_res})...")
         
     start_time = time.time()
-    final_img, _, _ = safe_compute_grid(xmin, xmax, ymin, ymax, quality_res, quality_res, final_max_iter, rpn_tokens, is_julia, c_val)
+    # Финальный рендер требует double precision (use_double=True) для устранения блочной пикселизации
+    final_img, _, _ = safe_compute_grid(
+        xmin, xmax, ymin, ymax, render_res, render_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=True
+    )
     elapsed_time = time.time() - start_time
     
     log("COMPUTE", "GRID", f"Матрица рассчитана за {elapsed_time:.2f} сек. Применяем тонирование...")
     
     if progress_callback:
-        progress_callback("🎨 Магическая цветовая фильтрация и тонирование...")
+        progress_callback("🎨 Магическая цветовая фильтрация...")
     processed_img = apply_adaptive_tonemapping(final_img, final_max_iter)
     
-    # Повторная проверка для высокого разрешения (на случай граничных эффектов)
     if not check_aesthetic_quality(processed_img):
-        log("WARN", "QUALITY", "Фрактал отклонён финальным фильтром качества.")
-        return None, None
+        log("WARN", "QUALITY", "Фрактал отклонён финальным фильтром эстетического качества.")
+        return None, None, None
         
-    fig = plt.figure(figsize=(12, 12), facecolor='black')
-    try:
-        cmap_obj = get_classic_colormap()
-        cmap_obj.set_bad(color='black')
-        
-        plt.imshow(processed_img, cmap=cmap_obj, extent=[xmin, xmax, ymin, ymax], origin='lower')
-        plt.axis('off')
-        plt.tight_layout()
-        
-        buf = io.BytesIO()
-        plt.savefig(buf, format='jpeg', facecolor='black', edgecolor='none', bbox_inches='tight', pad_inches=0, dpi=100, pil_kwargs={'quality': 92, 'optimize': True})
-        buf.seek(0)
-    finally:
-        plt.close(fig)  
-    
-    return buf, formula_str
+    # Экспорт в два формата
+    buf_jpeg, buf_png = export_to_buffers_pil(processed_img, CLASSIC_CMAP, target_res=target_res)
+    return buf_jpeg, buf_png, formula_str
+
 
 # --- Автоматическая рассылка подписчикам ---
 def automated_delivery_loop():
@@ -756,25 +758,36 @@ def automated_delivery_loop():
             
         log("INFO", "AUTO", f"Начинаю автоматическую отправку фрактала для {len(subs)} подписчиков...")
         try:
-            buf, formula = None, None
+            buf_jpeg, buf_png, formula = None, None, None
             for _ in range(15):  
-                buf, formula = generate_fractal_pipeline(quality_res=1200, steps=10)
-                if buf is not None:
+                buf_jpeg, buf_png, formula = generate_fractal_pipeline(quality_res=1600, steps=10)
+                if buf_jpeg is not None:
                     break
                     
-            if buf is not None:
+            if buf_jpeg is not None:
                 for chat_id in list(subs):
                     try:
-                        buf.seek(0)
+                        buf_jpeg.seek(0)
+                        buf_png.seek(0)
+                        
                         bot.send_photo(
                             chat_id,
-                            buf,
+                            buf_jpeg,
                             caption=(
                                 "👁‍🗨 **Внеочередная материализация хаоса**\n\n"
                                 "Высший математический порядок пробился сквозь бесконечность.\n"
                                 f"Проекция уравнения эволюции:\n`{formula}`\n\n"
                                 "⏳ _Вы можете остановить этот поток в меню кнопкой в любой момент._"
                             ),
+                            parse_mode='Markdown',
+                            timeout=90
+                        )
+                        
+                        buf_png.name = f"fractal_{secrets.token_hex(4)}.png"
+                        bot.send_document(
+                            chat_id,
+                            buf_png,
+                            caption="🖼️ **PNG-оригинал без сжатия (для детального зума)**",
                             parse_mode='Markdown',
                             timeout=90
                         )
@@ -785,7 +798,8 @@ def automated_delivery_loop():
                             remove_subscriber(chat_id)
                     except Exception as e:
                         log("ERROR", "AUTO", f"Ошибка отправки пользователю {chat_id}: {e}")
-                buf.close()
+                buf_jpeg.close()
+                buf_png.close()
         except Exception as e:
             log("ERROR", "AUTO", f"Критическая ошибка рассылки: {e}")
 
@@ -812,11 +826,11 @@ def get_main_keyboard(chat_id):
 def heartbeat_loop():
     while True:
         try:
-            # Замените этот URL на URL вашего Flask-приложения на PythonAnywhere
             requests.get("https://yourusername.pythonanywhere.com/ping", timeout=10)
         except Exception as e:
             log("WARN", "SYSTEM", f"Не удалось отправить пинг на сервер-наблюдатель: {e}")
         time.sleep(60)
+
 
 # --- Telegram Bot Handlers ---
 @bot.message_handler(commands=['start', 'help', 'restart'])
@@ -850,7 +864,7 @@ def send_fractal(message):
     updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
     
     try:
-        buf, formula = None, None
+        buf_jpeg, buf_png, formula = None, None, None
         max_attempts = 15
         
         for attempt in range(1, max_attempts + 1):
@@ -859,13 +873,13 @@ def send_fractal(message):
             
             updater.update(f"🧬 *Попытка {attempt}/{max_attempts}*\n└ Инициализация матрицы...", force=True)
             
-            buf, formula = generate_fractal_pipeline(
-                quality_res=1200, 
+            buf_jpeg, buf_png, formula = generate_fractal_pipeline(
+                quality_res=1600, 
                 steps=10, 
                 progress_callback=make_callback(attempt)
             )
             
-            if buf is not None:
+            if buf_jpeg is not None:
                 break
             else:
                 updater.update(
@@ -875,30 +889,42 @@ def send_fractal(message):
                 )
                 time.sleep(1.0)
         
-        if buf is None:
+        if buf_jpeg is None:
             updater.update("👁‍⚙ Математический хаос оказался слишком неустойчив. Повторите попытку прорыва.", force=True)
             return
             
-        # Случайное дизайнерское описание
-        random_caption_phrase = get_random_phrase()
-        
         bot.delete_message(chat_id, status_msg.message_id)
         
-        log("UPLOAD", "TELEGRAM", f"Отправка файла {chat_id}...")
+        # 1. Отправляем быстрое превью в виде обычной сжатой фотографии
+        log("UPLOAD", "TELEGRAM", f"Отправка превью-фото {chat_id}...")
         bot.send_photo(
             chat_id, 
-            buf, 
+            buf_jpeg, 
             caption=(
                 f"🔮 **Погружение совершено.**\n\n"
                 f"Хаос упорядочен формулой:\n`{formula}`\n\n"
-                f"{random_caption_phrase}"
+                f"{get_random_phrase()}"
             ), 
             parse_mode='Markdown',
             reply_markup=get_main_keyboard(chat_id),
             timeout=90
         )
-        log("SUCCESS", "TELEGRAM", f"Фрактал успешно доставлен пользователю {chat_id}.")
-        buf.close()
+        
+        # 2. Следом отправляем оригинальный файл PNG без сжатия в виде Документа
+        log("UPLOAD", "TELEGRAM", f"Отправка оригинального PNG-файла {chat_id}...")
+        buf_png.name = f"fractal_{secrets.token_hex(4)}.png"
+        bot.send_document(
+            chat_id,
+            buf_png,
+            caption="🖼️ **Оригинальная проекция (PNG, без сжатия)**\n└ _Скачайте файл, чтобы рассмотреть микродетали без артефактов зума._",
+            parse_mode='Markdown',
+            timeout=90
+        )
+        
+        log("SUCCESS", "TELEGRAM", f"Фрактал успешно доставлен пользователю {chat_id} в обоих форматах.")
+        buf_jpeg.close()
+        buf_png.close()
+        
     except telebot.apihelper.ApiTelegramException as te:
         if te.error_code in [403, 400]:
             log("WARN", "TELEGRAM", f"Пользователь {chat_id} заблокировал бота. Удаление подписки.")
@@ -955,7 +981,7 @@ def send_batch_fractal(message):
     
     try:
         for i in range(num):
-            buf, formula = None, None
+            buf_jpeg, buf_png, formula = None, None, None
             max_attempts = 15
             
             for attempt in range(1, max_attempts + 1):
@@ -971,13 +997,13 @@ def send_batch_fractal(message):
                     force=True
                 )
                 
-                buf, formula = generate_fractal_pipeline(
-                    quality_res=1200, 
+                buf_jpeg, buf_png, formula = generate_fractal_pipeline(
+                    quality_res=1600, 
                     steps=10, 
                     progress_callback=make_batch_callback(i, attempt)
                 )
                 
-                if buf is not None:
+                if buf_jpeg is not None:
                     break
                 else:
                     updater.update(
@@ -987,12 +1013,13 @@ def send_batch_fractal(message):
                     )
                     time.sleep(1.0)
             
-            if buf is not None:
+            if buf_jpeg is not None:
                 try:
                     log("UPLOAD", "TELEGRAM", f"Отправка кадра {i+1}/{num} пользователю {chat_id}...")
+                    # В пакетах отправляем только JPEG-версии повышенной четкости, чтобы не спамить чат файлами
                     bot.send_photo(
                         chat_id,
-                        buf,
+                        buf_jpeg,
                         caption=f"✨ **Фрактальный слой #{i+1}**\n\nТрансцендентное уравнение эволюции:\n`{formula}`",
                         parse_mode='Markdown',
                         timeout=90
@@ -1007,7 +1034,8 @@ def send_batch_fractal(message):
                 except Exception as e:
                     log("ERROR", "TELEGRAM", f"Ошибка отправки кадра {i+1} пакета: {e}")
                 finally:
-                    buf.close()
+                    buf_jpeg.close()
+                    buf_png.close()
                 time.sleep(1)
                 
         try:
