@@ -813,6 +813,7 @@ def automated_delivery_loop():
 def get_main_keyboard(chat_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     btn_gen = types.KeyboardButton("🌌 Раствориться в бесконечности")
+    btn_lucky = types.KeyboardButton("🌀 Я думаю мне повезёт")
     
     subs = load_subscribers()
     if chat_id in subs:
@@ -822,11 +823,37 @@ def get_main_keyboard(chat_id):
         
     btn_batch3 = types.KeyboardButton("🔮 Сгенерировать пакет из 3 фракталов")
     btn_batch5 = types.KeyboardButton("🔮 Сгенерировать пакет из 5 фракталов")
+    btn_help = types.KeyboardButton("❓ Помощь")
     
     markup.row(btn_gen)
+    markup.row(btn_lucky)
     markup.row(btn_sub)
     markup.row(btn_batch3, btn_batch5)
+    markup.row(btn_help)
     return markup
+
+HELP_TEXT = (
+    "👁‍⚙ **Фрактальный навигатор — справка**\n\n"
+    "Бот генерирует уникальные процедурные фракталы на основе случайных математических формул. "
+    "Каждое изображение создаётся с нуля и проходит эстетический фильтр.\n\n"
+    "🎛 **Кнопки управления:**\n\n"
+    "🌌 *Раствориться в бесконечности* – обычное погружение со случайным зумом (от 4 до 10 шагов). "
+    "Даёт выразительные структуры среднего масштаба.\n\n"
+    "🌀 *Я думаю мне повезёт* – экстремальный глубокий зум (от 15 до 30 шагов). "
+    "Позволяет заглянуть в микроскопические детали, недоступные обычному взгляду. "
+    "Вычисления могут занимать больше времени (до 2 минут).\n\n"
+    "🧿 *Запустить бесконечный поток* – раз в 2 часа бот будет автоматически присылать вам новый фрактал.\n"
+    "⏳ *Остановить поток* – отключает автоматическую рассылку.\n\n"
+    "🔮 *Пакет из 3 / 5 фракталов* – последовательная генерация сразу нескольких изображений "
+    "(отправляются только JPEG-превью для экономии трафика).\n\n"
+    "❓ *Помощь* – показывает это сообщение.\n\n"
+    "⚙️ **Технические детали:**\n"
+    "• Одно вычисление длится не более 120 секунд (защита от зависаний).\n"
+    "• Между генерациями действует пауза 4 секунды.\n"
+    "• Для детального просмотра скачивайте PNG-файл, прикреплённый к каждому фракталу.\n"
+    "• При проблемах с ботом используйте /start для перезагрузки интерфейса.\n\n"
+    "Приятных погружений в бесконечность! 🌀"
+)
 
 # --- Система отправки пингов на облако (Наблюдатель) ---
 def heartbeat_loop():
@@ -846,39 +873,53 @@ def send_welcome(message):
             message.chat.id, 
             "«Однажды погрузившись в фрактал, ты больше никогда не остановишься. "
             "Позволь математике растворить тебя в бесконечности иррациональных чисел...»\n\n"
-            "👁‍⚙ **Синхронизация интерфейса завершена.** Старые кнопки обновлены.\n"
-            "Используйте панель управления ниже для взаимодействия с бесконечностью.", 
+            "👁‍⚙ **Синхронизация интерфейса завершена.** Используйте панель управления ниже.\n"
+            "Нажмите ❓ *Помощь*, чтобы узнать подробнее о всех функциях.",
             reply_markup=get_main_keyboard(message.chat.id),
             parse_mode='Markdown'
         )
     except Exception as e:
         log("ERROR", "TELEGRAM", f"Ошибка отправки приветствия: {e}")
 
+@bot.message_handler(commands=['help'])
+@bot.message_handler(func=lambda message: message.text == "❓ Помощь")
+def send_help(message):
+    try:
+        bot.send_message(
+            message.chat.id,
+            HELP_TEXT,
+            reply_markup=get_main_keyboard(message.chat.id),
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        log("ERROR", "TELEGRAM", f"Ошибка отправки справки: {e}")
+
 @bot.message_handler(func=lambda message: message.text == "🌌 Раствориться в бесконечности")
+@bot.message_handler(func=lambda message: message.text == "🌀 Я думаю мне повезёт")
 @bot.message_handler(commands=['generate'])
 def send_fractal(message):
     chat_id = message.chat.id
-    
+
+    # --- ВЫБОР ГЛУБИНЫ ---
+    if "повезёт" in message.text:
+        steps_min, steps_max = 15, 30
+        mode_text = "🌀 Сверхглубокий зум"
+    else:
+        steps_min, steps_max = 4, 10
+        mode_text = "🌌 Стандартное погружение"
+    # -----------------------
+
     status, val = user_manager.try_start_job(chat_id)
     if status == "busy":
-        try:
-            bot.send_message(chat_id, "⚠️ Вычисления уже запущены. Дождитесь завершения текущего процесса.")
-        except Exception:
-            pass
+        bot.send_message(chat_id, "⚠️ Вычисления уже запущены...")
         return
     elif status == "cooldown":
-        try:
-            bot.send_message(chat_id, f"⏳ Пожалуйста, подождите {val:.1f} сек. перед следующей генерацией.")
-        except Exception:
-            pass
+        bot.send_message(chat_id, f"⏳ Подождите {val:.1f} сек...")
         return
 
-    # КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: try...finally оборачивает абсолютно ВСЁ после try_start_job.
-    # Если на этапе send_message упадет прокси, пользователь ГАРАНТИРОВАННО разблокируется.
     try:
-        status_msg = bot.send_message(chat_id, "🧬 Инициализация структуры... Настройка математического ядра.")
-        log("INFO", "TELEGRAM", f"Пользователь {chat_id} запросил одиночный фрактал.")
-        
+        random_steps = random.randint(steps_min, steps_max)
+        status_msg = bot.send_message(chat_id, f"{mode_text} на {random_steps} шагов...")
         updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
         
         buf_jpeg, buf_png, formula = None, None, None
