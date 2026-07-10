@@ -1,11 +1,33 @@
+# Файлы конфигурации и токены (Секретные данные)
 .env
+config.json
 
-__pycache__/
-*.pyc
+# База данных подписчиков и временные файлы статуса
+subscribers.txt
+last_seen.txt
 
-venv/
+# Окружение Python
 .venv/
+venv/
+ENV/
+pyvenv.cfg
 
-*.log
+# Кэш Python
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-Photos/
+# Настройки сред разработки
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Временные файлы графиков
+*.png
+*.jpeg
+*.jpg

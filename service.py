@@ -5,12 +5,12 @@ import random
 import secrets
 import hashlib
 import threading
+import signal  # Защита сокетов при прерывании процесса
+import sys
 import numpy as np
 import telebot
 from telebot import types
 from telebot import apihelper
-import requests
-import signal
 
 # Отключаем GUI для Matplotlib
 import matplotlib
@@ -50,10 +50,7 @@ except ImportError:
 log_lock = threading.Lock()
 
 def log(level, section, message):
-    """
-    Выводит структурированный, легкий лог в консоль.
-    Безопасен при параллельном исполнении задач пользователями.
-    """
+    """Выводит структурированный, легкий лог в консоль."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     thread_name = threading.current_thread().name
     with log_lock:
@@ -71,23 +68,18 @@ class ProgressUpdater:
         self.lock = threading.Lock()
 
     def update(self, text, force=False):
-        """
-        Редактирует сообщение в Telegram.
-        Пропускает частые промежуточные шаги, если с момента прошлого апдейта прошло < 1.2 сек.
-        """
+        """Редактирует сообщение в Telegram с троттлингом 1.2 сек."""
         with self.lock:
             now = time.time()
             if text == self.last_text:
                 return
             
-            # Разрешаем отправку, если это критический шаг (force) или прошел таймаут лимитов API
             if force or (now - self.last_update_time >= 1.2):
                 try:
                     self.bot.edit_message_text(text, self.chat_id, self.message_id, parse_mode='Markdown')
                     self.last_text = text
                     self.last_update_time = now
                 except Exception:
-                    # Игнорируем сетевые ошибки редактирования (например, если сообщение такое же или удалено)
                     pass
 
 
@@ -180,6 +172,39 @@ class UserManager:
                 self.active_jobs.remove(chat_id)
 
 user_manager = UserManager()
+
+
+# --- Система случайных фраз ---
+PHRASES_FILE = "phrases.txt"
+
+DEFAULT_PHRASES = [
+    "Эстетика фрактальной композиции в ее чистом математическом проявлении.",
+    "Баланс симметрии и асимметрии, рожденный формулой.",
+    "Геометрия как способ упорядочить визуальный хаос.",
+    "Исследование пластики и ритма комплексного пространства."
+]
+
+def load_phrases():
+    """Считывает дизайнерские фразы из файла phrases.txt. При отсутствии берет дефолтные."""
+    if not os.path.exists(PHRASES_FILE):
+        log("WARN", "SYSTEM", f"Файл {PHRASES_FILE} не найден. Используются встроенные фразы.")
+        return DEFAULT_PHRASES
+    try:
+        with open(PHRASES_FILE, "r", encoding="utf-8") as f:
+            phrases = [line.strip() for line in f if line.strip()]
+        if phrases:
+            log("INFO", "SYSTEM", f"Успешно загружено {len(phrases)} фраз для генератора.")
+            return phrases
+        return DEFAULT_PHRASES
+    except Exception as e:
+        log("ERROR", "SYSTEM", f"Ошибка при чтении {PHRASES_FILE}: {e}")
+        return DEFAULT_PHRASES
+
+# Загружаем фразы один раз при инициализации скрипта
+bot_phrases = load_phrases()
+
+def get_random_phrase():
+    return random.choice(bot_phrases)
 
 
 # --- Константы RPN-вычислителя ---
@@ -716,6 +741,16 @@ def get_main_keyboard(chat_id):
     markup.row(btn_batch3, btn_batch5)
     return markup
 
+# --- Система отправки пингов на облако (Наблюдатель) ---
+def heartbeat_loop():
+    while True:
+        try:
+            # Замените этот URL на URL вашего Flask-приложения на PythonAnywhere
+            requests.get("https://yourusername.pythonanywhere.com/ping", timeout=10)
+        except Exception as e:
+            log("WARN", "SYSTEM", f"Не удалось отправить пинг на сервер-наблюдатель: {e}")
+        time.sleep(60)
+
 # --- Telegram Bot Handlers ---
 @bot.message_handler(commands=['start', 'help', 'restart'])
 def send_welcome(message):
@@ -745,7 +780,6 @@ def send_fractal(message):
     status_msg = bot.send_message(chat_id, "🧬 Инициализация структуры... Настройка математического ядра.")
     log("INFO", "TELEGRAM", f"Пользователь {chat_id} запросил одиночный фрактал.")
     
-    # Инициализируем наш умный локальный апдейтер лимитов сообщений
     updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
     
     try:
@@ -753,7 +787,6 @@ def send_fractal(message):
         max_attempts = 15
         
         for attempt in range(1, max_attempts + 1):
-            # Замыкание для передачи статуса из глубоких недр вычислителя
             def make_callback(att):
                 return lambda text: updater.update(f"🧬 *Попытка {att}/{max_attempts}*\n└ {text}")
             
@@ -773,19 +806,26 @@ def send_fractal(message):
                     f"└ _Точка поля не рекомендована к визуализации (низкая эстетика). Ищем новую сингулярность..._",
                     force=True
                 )
-                time.sleep(1.0) # Пауза, чтобы глаз пользователя зафиксировал причину пересчета
+                time.sleep(1.0)
         
         if buf is None:
             updater.update("👁‍⚙ Математический хаос оказался слишком неустойчив. Повторите попытку прорыва.", force=True)
             return
             
+        # Случайное дизайнерское описание
+        random_caption_phrase = get_random_phrase()
+        
         bot.delete_message(chat_id, status_msg.message_id)
         
         log("UPLOAD", "TELEGRAM", f"Отправка файла {chat_id}...")
         bot.send_photo(
             chat_id, 
             buf, 
-            caption=f"🔮 **Погружение совершено.**\n\nХаос упорядочен формулой:\n`{formula}`\n\nКаждый пиксель — это аттрактор, застывший во времени.", 
+            caption=(
+                f"🔮 **Погружение совершено.**\n\n"
+                f"Хаос упорядочен формулой:\n`{formula}`\n\n"
+                f"{random_caption_phrase}"
+            ), 
             parse_mode='Markdown',
             reply_markup=get_main_keyboard(chat_id),
             timeout=90
@@ -852,7 +892,6 @@ def send_batch_fractal(message):
             max_attempts = 15
             
             for attempt in range(1, max_attempts + 1):
-                # Настраиваем вывод шагов для конкретного фрактала из пакета
                 def make_batch_callback(index, att):
                     return lambda text: updater.update(
                         f"🪐 *Фрактал {index+1} из {num}*\n"
@@ -917,19 +956,10 @@ def send_batch_fractal(message):
     finally:
         user_manager.end_job(chat_id)
 
-# Поток отправки сигналов жизни на внешний сервер-наблюдатель
-def heartbeat_loop():
-    while True:
-        try:
-            # Замените URL на адрес вашего Flask-приложения на PythonAnywhere
-            requests.get("https://yourusername.pythonanywhere.com/ping", timeout=10)
-        except Exception as e:
-            log("WARN", "SYSTEM", f"Не удалось отправить пинг на сервер-наблюдатель: {e}")
-        time.sleep(60)
-
-# В блоке if __name__ == "__main__": перед стартом bot.infinity_polling():
-
+# --- Инициализация и запуск процесса ---
 if __name__ == "__main__":
+    import requests 
+    import signal  
     
     # Фоновый поток автоматической рассылки
     delivery_thread = threading.Thread(target=automated_delivery_loop, name="AutoSend")
@@ -955,10 +985,8 @@ if __name__ == "__main__":
     try:
         bot.infinity_polling()
     except (KeyboardInterrupt, SystemExit):
-        # Если прерывание все-таки пробилось наверх — гасим его для корректной отправки запроса
         pass
     finally:
-        # Этот блок выполнится ВСЕГДА: и при нормальном выходе из polling, и при любом исключении!
         try:
             signal.signal(signal.SIGINT, signal.SIG_IGN)
         except Exception:
@@ -966,7 +994,6 @@ if __name__ == "__main__":
             
         log("INFO", "SYSTEM", "Завершение работы пуллинга. Перевожу статус бота в режим 'Офлайн'...")
         try:
-            # Ставим статус "Вне сети" с таймаутом 5 секунд
             requests.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/setMyShortDescription",
                 json={"short_description": "🔴 Вне сети. Сервер временно отключен на техническое обслуживание."},
