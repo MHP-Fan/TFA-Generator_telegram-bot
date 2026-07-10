@@ -235,7 +235,6 @@ def get_classic_colormap():
     ]
     return LinearSegmentedColormap.from_list("DynamicMap", colors, N=2048)
 
-# Инициализируем палитру один раз на старте
 CLASSIC_CMAP = get_classic_colormap()
 
 # --- Декодирование процедурной грамматики ---
@@ -328,10 +327,9 @@ def rpn_to_str(rpn):
     return stack[0] if stack else "Z"
 
 
-# --- Вычислительные интерпретаторы с поддержкой динамической точности ---
+# --- Вычислительные интерпретаторы (с поддержкой динамической точности) ---
 def evaluate_rpn_pytorch(rpn, Z, C, device, use_double=False):
     stack = []
-    # Определяем рабочий тип комплексных чисел на основе флага точности
     torch_complex = torch.complex128 if use_double else torch.complex64
     for t_type, op, val in rpn:
         if t_type == 0:
@@ -437,8 +435,8 @@ def evaluate_rpn_numpy(rpn, Z, C, use_double=False):
     return Z_next
 
 
-# --- Итераторы сеток ---
-def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, device, use_double=False):
+# --- Итераторы сеток (с проверкой дедлайна) ---
+def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, device, use_double=False, deadline=None):
     torch_dtype = torch.float64 if use_double else torch.float32
     torch_complex = torch.complex128 if use_double else torch.complex64
 
@@ -462,6 +460,10 @@ def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_i
     
     with torch.no_grad():
         for i in range(max_iter):
+            # Аварийный выход по таймауту
+            if deadline and time.time() > deadline:
+                raise TimeoutError("Превышен жесткий лимит времени вычислений (2 минуты).")
+                
             Z_next = evaluate_rpn_pytorch(rpn, Z, C_param, device, use_double)
             mag_sq = Z_next.real**2 + Z_next.imag**2
             escaped = mag_sq > R_esc_sq
@@ -492,7 +494,7 @@ def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_i
         img[mask] = max_iter
     return img.cpu().numpy(), x.cpu().numpy(), y.cpu().numpy()
 
-def compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double=False):
+def compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double=False, deadline=None):
     dtype = np.float64 if use_double else np.float32
     complex_dtype = np.complex128 if use_double else np.complex64
 
@@ -511,6 +513,10 @@ def compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_ite
     R_esc_sq, eps_att_sq = 1e8, 1e-12
     
     for i in range(max_iter):
+        # Аварийный выход по таймауту
+        if deadline and time.time() > deadline:
+            raise TimeoutError("Превышен жесткий лимит времени вычислений (2 минуты).")
+            
         Z_next = evaluate_rpn_numpy(rpn, Z, C_param, use_double)
         mag_sq = np.real(Z_next)**2 + np.imag(Z_next)**2
         escaped = mag_sq > R_esc_sq
@@ -539,17 +545,17 @@ def compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_ite
     img[mask] = max_iter
     return img, x, y
 
-def safe_compute_grid(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double=False):
+def safe_compute_grid(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double=False, deadline=None):
     if HAS_TORCH and DEVICE.type == 'cuda':
         try:
             return compute_procedural_grid_pytorch(
-                xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, DEVICE, use_double
+                xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, DEVICE, use_double, deadline
             )
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 torch.cuda.empty_cache()
                 log("ERROR", "DEVICE", "Переполнение видеопамяти CUDA. Переход на CPU.")
-    return compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double)
+    return compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double, deadline)
 
 
 # --- Навигация и контроль качества ---
@@ -572,10 +578,10 @@ def find_boundary_point_v2(img, x, y, max_iter, rng):
     idx = indices[rng.randint(0, len(indices) - 1)]
     return x[idx[1]], y[idx[0]]
 
-def find_highly_decorated_c_v2(rpn, rng):
+def find_highly_decorated_c_v2(rpn, rng, deadline=None):
     xmin, xmax, ymin, ymax = -2.0, 2.0, -2.0, 2.0
     for _ in range(5):  
-        img, x, y = safe_compute_grid(xmin, xmax, ymin, ymax, 150, 150, 100, rpn, False, 0j, use_double=False)
+        img, x, y = safe_compute_grid(xmin, xmax, ymin, ymax, 150, 150, 100, rpn, False, 0j, use_double=False, deadline=deadline)
         target_x, target_y = find_boundary_point_v2(img, x, y, 100, rng)
         range_x, range_y = (xmax - xmin)/2.5, (ymax - ymin)/2.5
         xmin, xmax = target_x - range_x/2, target_x + range_x/2
@@ -618,7 +624,7 @@ def check_aesthetic_quality(processed_img):
     return True
 
 
-# --- Высококачественный пиксель-в-пиксель экспорт напрямую через PIL (Без Matplotlib) ---
+# --- Высококачественный пиксель-в-пиксель экспорт напрямую через PIL ---
 def export_to_buffers_pil(processed_img, cmap=None, target_res=1600):
     """
     Применяет палитру напрямую к массиву NumPy и возвращает два буфера:
@@ -631,11 +637,9 @@ def export_to_buffers_pil(processed_img, cmap=None, target_res=1600):
     body_mask = np.isnan(processed_img)
     clean_img = np.nan_to_num(processed_img, nan=0.0)
     
-    # Получаем RGBA массив float (0.0 - 1.0)
     rgba_img = cmap(clean_img)
     rgba_img[body_mask] = [0.0, 0.0, 0.0, 1.0] # Тело фрактала красим в черный
     
-    # Переводим в uint8
     rgb_img = (rgba_img[:, :, :3] * 255.0).astype(np.uint8)
     img_pil = Image.fromarray(rgb_img)
     
@@ -656,8 +660,11 @@ def export_to_buffers_pil(processed_img, cmap=None, target_res=1600):
     return buf_jpeg, buf_png
 
 
-# --- Оптимизированный генератор фракталов ---
+# --- Оптимизированный генератор фракталов с лимитом времени 2 минуты ---
 def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None):
+    start_time = time.time()
+    deadline = start_time + 120.0  # Жесткий лимит 120 секунд (2 минуты)
+
     rng = random.Random(secrets.randbits(128))
     seed_int = rng.randint(0, 2**128 - 1)
     
@@ -667,6 +674,8 @@ def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None
     ast_to_rpn(ast_tree, rpn_tokens)
     
     while not validate_rpn(rpn_tokens):
+        if time.time() > deadline:
+            raise TimeoutError("Таймаут безопасности превышен на этапе генерации RPN.")
         seed_int = rng.randint(0, 2**128 - 1)
         decoder = EntropyDecoder(seed_int)
         ast_tree = generate_ast(decoder, depth=1, max_depth=6)
@@ -678,7 +687,7 @@ def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None
     
     if progress_callback:
         progress_callback("🌀 Расчёт векторов комплексного поля...")
-    c_val = find_highly_decorated_c_v2(rpn_tokens, rng) if is_julia else 0j
+    c_val = find_highly_decorated_c_v2(rpn_tokens, rng, deadline=deadline) if is_julia else 0j
     
     xmin, xmax, ymin, ymax = -2.0, 2.0, -2.0, 2.0
     for step in range(1, steps + 1):
@@ -687,7 +696,7 @@ def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None
         current_max_iter = 120 + step * 60
         # Для шагов зума всегда используем быстрый float32
         img, x, y = safe_compute_grid(
-            xmin, xmax, ymin, ymax, 250, 250, current_max_iter, rpn_tokens, is_julia, c_val, use_double=False
+            xmin, xmax, ymin, ymax, 250, 250, current_max_iter, rpn_tokens, is_julia, c_val, use_double=False, deadline=deadline
         )
         target_x, target_y = find_boundary_point_v2(img, x, y, current_max_iter, rng)
         range_x, range_y = (xmax - xmin)/2.5, (ymax - ymin)/2.5
@@ -702,7 +711,7 @@ def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None
     
     preview_res = 200
     preview_img, _, _ = safe_compute_grid(
-        xmin, xmax, ymin, ymax, preview_res, preview_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=False
+        xmin, xmax, ymin, ymax, preview_res, preview_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=False, deadline=deadline
     )
     preview_processed = apply_adaptive_tonemapping(preview_img, final_max_iter)
     
@@ -711,7 +720,7 @@ def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None
         return None, None, None
         
     # --- ФИНАЛЬНЫЙ РЕНДЕР (Адаптивные параметры качества) ---
-    # Если запущены на GPU, ставим повышенное качество и SSAA-фильтрацию. На CPU снижаем, чтобы не зависать.
+    # Если запущены на GPU, ставим повышенное качество и SSAA-фильтрацию. На CPU снижаем.
     if HAS_TORCH and DEVICE.type == 'cuda':
         target_res = quality_res # 1600x1600
         ssaa_factor = 1.5       # Рендерим 2400x2400
@@ -725,17 +734,11 @@ def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None
     if progress_callback:
         progress_callback(f"🧬 Рендеринг фрактала высокой точности ({target_res}x{target_res})...")
         
-    start_time = time.time()
     # Финальный рендер требует double precision (use_double=True) для устранения блочной пикселизации
     final_img, _, _ = safe_compute_grid(
-        xmin, xmax, ymin, ymax, render_res, render_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=True
+        xmin, xmax, ymin, ymax, render_res, render_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=True, deadline=deadline
     )
-    elapsed_time = time.time() - start_time
     
-    log("COMPUTE", "GRID", f"Матрица рассчитана за {elapsed_time:.2f} сек. Применяем тонирование...")
-    
-    if progress_callback:
-        progress_callback("🎨 Магическая цветовая фильтрация...")
     processed_img = apply_adaptive_tonemapping(final_img, final_max_iter)
     
     if not check_aesthetic_quality(processed_img):
@@ -760,9 +763,12 @@ def automated_delivery_loop():
         try:
             buf_jpeg, buf_png, formula = None, None, None
             for _ in range(15):  
-                buf_jpeg, buf_png, formula = generate_fractal_pipeline(quality_res=1600, steps=10)
-                if buf_jpeg is not None:
-                    break
+                try:
+                    buf_jpeg, buf_png, formula = generate_fractal_pipeline(quality_res=1600, steps=10)
+                    if buf_jpeg is not None:
+                        break
+                except TimeoutError:
+                    log("WARN", "AUTO", "Прервано по таймауту в цикле авто-генерации. Ищем дальше...")
                     
             if buf_jpeg is not None:
                 for chat_id in list(subs):
@@ -835,15 +841,18 @@ def heartbeat_loop():
 # --- Telegram Bot Handlers ---
 @bot.message_handler(commands=['start', 'help', 'restart'])
 def send_welcome(message):
-    bot.send_message(
-        message.chat.id, 
-        "«Однажды погрузившись в фрактал, ты больше никогда не остановишься. "
-        "Позволь математике растворить тебя в бесконечности иррациональных чисел...»\n\n"
-        "👁‍⚙ **Синхронизация интерфейса завершена.** Старые кнопки обновлены.\n"
-        "Используйте панель управления ниже для взаимодействия с бесконечностью.", 
-        reply_markup=get_main_keyboard(message.chat.id),
-        parse_mode='Markdown'
-    )
+    try:
+        bot.send_message(
+            message.chat.id, 
+            "«Однажды погрузившись в фрактал, ты больше никогда не остановишься. "
+            "Позволь математике растворить тебя в бесконечности иррациональных чисел...»\n\n"
+            "👁‍⚙ **Синхронизация интерфейса завершена.** Старые кнопки обновлены.\n"
+            "Используйте панель управления ниже для взаимодействия с бесконечностью.", 
+            reply_markup=get_main_keyboard(message.chat.id),
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        log("ERROR", "TELEGRAM", f"Ошибка отправки приветствия: {e}")
 
 @bot.message_handler(func=lambda message: message.text == "🌌 Раствориться в бесконечности")
 @bot.message_handler(commands=['generate'])
@@ -852,18 +861,26 @@ def send_fractal(message):
     
     status, val = user_manager.try_start_job(chat_id)
     if status == "busy":
-        bot.send_message(chat_id, "⚠️ Вычисления уже запущены. Дождитесь завершения текущего процесса.")
+        try:
+            bot.send_message(chat_id, "⚠️ Вычисления уже запущены. Дождитесь завершения текущего процесса.")
+        except Exception:
+            pass
         return
     elif status == "cooldown":
-        bot.send_message(chat_id, f"⏳ Пожалуйста, подождите {val:.1f} сек. перед следующей генерацией.")
+        try:
+            bot.send_message(chat_id, f"⏳ Пожалуйста, подождите {val:.1f} сек. перед следующей генерацией.")
+        except Exception:
+            pass
         return
 
-    status_msg = bot.send_message(chat_id, "🧬 Инициализация структуры... Настройка математического ядра.")
-    log("INFO", "TELEGRAM", f"Пользователь {chat_id} запросил одиночный фрактал.")
-    
-    updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
-    
+    # КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: try...finally оборачивает абсолютно ВСЁ после try_start_job.
+    # Если на этапе send_message упадет прокси, пользователь ГАРАНТИРОВАННО разблокируется.
     try:
+        status_msg = bot.send_message(chat_id, "🧬 Инициализация структуры... Настройка математического ядра.")
+        log("INFO", "TELEGRAM", f"Пользователь {chat_id} запросил одиночный фрактал.")
+        
+        updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
+        
         buf_jpeg, buf_png, formula = None, None, None
         max_attempts = 15
         
@@ -873,11 +890,21 @@ def send_fractal(message):
             
             updater.update(f"🧬 *Попытка {attempt}/{max_attempts}*\n└ Инициализация матрицы...", force=True)
             
-            buf_jpeg, buf_png, formula = generate_fractal_pipeline(
-                quality_res=1600, 
-                steps=10, 
-                progress_callback=make_callback(attempt)
-            )
+            try:
+                buf_jpeg, buf_png, formula = generate_fractal_pipeline(
+                    quality_res=1600, 
+                    steps=10, 
+                    progress_callback=make_callback(attempt)
+                )
+            except TimeoutError as te:
+                log("ERROR", "TIMEOUT", f"Таймаут вычислений на попытке {attempt}: {te}")
+                # Если это была последняя попытка, пробрасываем ошибку дальше
+                if attempt == max_attempts:
+                    raise te
+                # Иначе пишем пользователю и пробуем другую координату
+                updater.update(f"⚠️ *Попытка {attempt}/{max_attempts}* прервана по таймауту (2 минуты). Ищем другую сингулярность...", force=True)
+                time.sleep(1.0)
+                continue
             
             if buf_jpeg is not None:
                 break
@@ -893,7 +920,10 @@ def send_fractal(message):
             updater.update("👁‍⚙ Математический хаос оказался слишком неустойчив. Повторите попытку прорыва.", force=True)
             return
             
-        bot.delete_message(chat_id, status_msg.message_id)
+        try:
+            bot.delete_message(chat_id, status_msg.message_id)
+        except Exception:
+            pass
         
         # 1. Отправляем быстрое превью в виде обычной сжатой фотографии
         log("UPLOAD", "TELEGRAM", f"Отправка превью-фото {chat_id}...")
@@ -925,6 +955,18 @@ def send_fractal(message):
         buf_jpeg.close()
         buf_png.close()
         
+    except TimeoutError:
+        log("ERROR", "TELEGRAM", f"Генерация для {chat_id} полностью остановлена из-за превышения лимита времени.")
+        try:
+            bot.send_message(
+                chat_id, 
+                "⚠️ **Вычисления прерваны по таймауту (2 минуты).**\n\n"
+                "Генерируемое фрактальное уравнение оказалось математически слишком ресурсоемким. "
+                "Ваша сессия была завершена во избежание зависания сервера. Пожалуйста, попробуйте снова.",
+                reply_markup=get_main_keyboard(chat_id)
+            )
+        except Exception:
+            pass
     except telebot.apihelper.ApiTelegramException as te:
         if te.error_code in [403, 400]:
             log("WARN", "TELEGRAM", f"Пользователь {chat_id} заблокировал бота. Удаление подписки.")
@@ -932,7 +974,7 @@ def send_fractal(message):
     except Exception as e:
         log("ERROR", "TELEGRAM", f"Сбой отправки: {e}")
         try:
-            bot.edit_message_text(f"❌ Система вычислений столкнулась с сетевой аномалией: {str(e)}", chat_id, status_msg.message_id)
+            bot.send_message(chat_id, f"❌ Произошел сбой при генерации фрактала: {str(e)}", reply_markup=get_main_keyboard(chat_id))
         except Exception:
             pass
     finally:
@@ -942,20 +984,23 @@ def send_fractal(message):
 @bot.message_handler(commands=['subscribe', 'unsubscribe'])
 def toggle_subscription(message):
     chat_id = message.chat.id
-    if "Запустить" in message.text or message.text == "/subscribe":
-        save_subscriber(chat_id)
-        bot.send_message(
-            chat_id, 
-            "👁‍⚙ **Поток запущен.**\n\nКаждые два часа математическое ядро будет проецировать новую случайную структуру высокой точности прямо в ваше сознание.",
-            reply_markup=get_main_keyboard(chat_id)
-        )
-    else:
-        remove_subscriber(chat_id)
-        bot.send_message(
-            chat_id, 
-            "⏳ **Поток приостановлен.**\n\nБесконечность отпускает вас... до следующего ручного погружения.",
-            reply_markup=get_main_keyboard(chat_id)
-        )
+    try:
+        if "Запустить" in message.text or message.text == "/subscribe":
+            save_subscriber(chat_id)
+            bot.send_message(
+                chat_id, 
+                "👁‍⚙ **Поток запущен.**\n\nКаждые два часа математическое ядро будет проецировать новую случайную структуру высокой точности прямо в ваше сознание.",
+                reply_markup=get_main_keyboard(chat_id)
+            )
+        else:
+            remove_subscriber(chat_id)
+            bot.send_message(
+                chat_id, 
+                "⏳ **Поток приостановлен.**\n\nБесконечность отпускает вас... до следующего ручного погружения.",
+                reply_markup=get_main_keyboard(chat_id)
+            )
+    except Exception as e:
+        log("ERROR", "TELEGRAM", f"Ошибка изменения подписки {chat_id}: {e}")
 
 @bot.message_handler(func=lambda message: message.text.startswith("🔮 Сгенерировать пакет"))
 def send_batch_fractal(message):
@@ -964,22 +1009,29 @@ def send_batch_fractal(message):
     
     status, val = user_manager.try_start_job(chat_id)
     if status == "busy":
-        bot.send_message(chat_id, "⚠️ Идет рендеринг предыдущего пакета. Пожалуйста, подождите.")
+        try:
+            bot.send_message(chat_id, "⚠️ Идет рендеринг предыдущего пакета. Пожалуйста, подождите.")
+        except Exception:
+            pass
         return
     elif status == "cooldown":
-        bot.send_message(chat_id, f"⏳ Система охлаждается. Попробуйте снова через {val:.1f} сек.")
+        try:
+            bot.send_message(chat_id, f"⏳ Система охлаждается. Попробуйте снова через {val:.1f} сек.")
+        except Exception:
+            pass
         return
 
-    status_msg = bot.send_message(
-        chat_id, 
-        f"🧬 Инициация каскадного пакета ({num} фрактальных проекций)...\nМатрицы рассчитываются последовательно на CUDA-ядрах."
-    )
-    log("INFO", "TELEGRAM", f"Пользователь {chat_id} запросил пакет из {num} фракталов.")
-    
-    updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
-    generated = 0
-    
+    # Защищенный try...finally блок для пакетного рендера
     try:
+        status_msg = bot.send_message(
+            chat_id, 
+            f"🧬 Инициация каскадного пакета ({num} фрактальных проекций)...\nМатрицы рассчитываются последовательно на CUDA-ядрах."
+        )
+        log("INFO", "TELEGRAM", f"Пользователь {chat_id} запросил пакет из {num} фракталов.")
+        
+        updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
+        generated = 0
+        
         for i in range(num):
             buf_jpeg, buf_png, formula = None, None, None
             max_attempts = 15
@@ -997,11 +1049,19 @@ def send_batch_fractal(message):
                     force=True
                 )
                 
-                buf_jpeg, buf_png, formula = generate_fractal_pipeline(
-                    quality_res=1600, 
-                    steps=10, 
-                    progress_callback=make_batch_callback(i, attempt)
-                )
+                try:
+                    buf_jpeg, buf_png, formula = generate_fractal_pipeline(
+                        quality_res=1600, 
+                        steps=10, 
+                        progress_callback=make_batch_callback(i, attempt)
+                    )
+                except TimeoutError:
+                    log("WARN", "TIMEOUT", f"Пакет: Фрактал {i+1} на попытке {attempt} прерван по таймауту.")
+                    if attempt == max_attempts:
+                        break
+                    updater.update(f"⚠️ *Фрактал {i+1} из {num}* (Таймаут). Пробуем другую сингулярность...", force=True)
+                    time.sleep(1.0)
+                    continue
                 
                 if buf_jpeg is not None:
                     break
@@ -1016,7 +1076,7 @@ def send_batch_fractal(message):
             if buf_jpeg is not None:
                 try:
                     log("UPLOAD", "TELEGRAM", f"Отправка кадра {i+1}/{num} пользователю {chat_id}...")
-                    # В пакетах отправляем только JPEG-версии повышенной четкости, чтобы не спамить чат файлами
+                    # В пакетах отправляем только JPEG-версии, чтобы не спамить чат файлами
                     bot.send_photo(
                         chat_id,
                         buf_jpeg,
@@ -1048,6 +1108,12 @@ def send_batch_fractal(message):
         else:
             bot.send_message(chat_id, "🔮 **Каскадный перенос завершен.** Вы растворились во множестве решений.", reply_markup=get_main_keyboard(chat_id))
             
+    except Exception as e:
+        log("ERROR", "TELEGRAM", f"Критическая ошибка пакетной генерации {chat_id}: {e}")
+        try:
+            bot.send_message(chat_id, f"❌ Произошел сетевой или вычислительный сбой при генерации пакета: {str(e)}", reply_markup=get_main_keyboard(chat_id))
+        except Exception:
+            pass
     finally:
         user_manager.end_job(chat_id)
 
