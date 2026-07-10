@@ -331,7 +331,8 @@ def evaluate_rpn_pytorch(rpn, Z, C, device):
         if t_type == 0:
             if op == VAR_Z: stack.append(Z)
             elif op == VAR_C: stack.append(C)
-            elif op == CONST: stack.append(torch.tensor(val, dtype=torch.complex128, device=device))
+            # Перевод констант на комплексные числа одинарной точности (complex64)
+            elif op == CONST: stack.append(torch.tensor(val, dtype=torch.complex64, device=device))
         elif t_type == 1:
             A = stack.pop()
             if op == OP_SIN:
@@ -373,8 +374,61 @@ def evaluate_rpn_pytorch(rpn, Z, C, device):
     Z_next = stack[0]
     anomalies = torch.isnan(Z_next) | torch.isinf(Z_next)
     if torch.any(anomalies):
-        Z_next = torch.where(anomalies, torch.tensor(1e5 + 0j, dtype=torch.complex128, device=device), Z_next)
+        Z_next = torch.where(anomalies, torch.tensor(1e5 + 0j, dtype=torch.complex64, device=device), Z_next)
     return Z_next
+
+
+def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, device):
+    # Замена float64 на float32
+    x = torch.linspace(xmin, xmax, width, dtype=torch.float32, device=device)
+    y = torch.linspace(ymin, ymax, height, dtype=torch.float32, device=device)
+    X, Y = torch.meshgrid(x, y, indexing='xy')
+    C = torch.complex(X, Y)
+    
+    if is_julia:
+        Z = C.clone()
+        C_param = torch.tensor(c, dtype=torch.complex64, device=device)
+    else:
+        Z = torch.zeros_like(C)
+        C_param = C
+        
+    img = torch.zeros(C.shape, dtype=torch.float32, device=device)
+    mask = torch.ones(C.shape, dtype=torch.bool, device=device)
+    
+    Z_prev, Z_prev2 = torch.zeros_like(C), torch.zeros_like(C)
+    R_esc_sq, eps_att_sq = 1e8, 1e-12
+    
+    with torch.no_grad():
+        for i in range(max_iter):
+            Z_next = evaluate_rpn_pytorch(rpn, Z, C_param, device)
+            mag_sq = Z_next.real**2 + Z_next.imag**2
+            escaped = mag_sq > R_esc_sq
+            
+            dist_prev_sq = (Z_next.real - Z_prev.real)**2 + (Z_next.imag - Z_prev.imag)**2
+            dist_prev2_sq = (Z_next.real - Z_prev2.real)**2 + (Z_next.imag - Z_prev2.imag)**2
+            attracted = (dist_prev_sq < eps_att_sq) | (dist_prev2_sq < eps_att_sq)
+            
+            finished = escaped | attracted
+            newly_finished = finished & mask
+            
+            if torch.any(newly_finished):
+                z_mag = torch.clamp(torch.sqrt(mag_sq[newly_finished]), min=1.001)
+                z_prev_mag = torch.clamp(torch.sqrt(Z.real**2 + Z.imag**2)[newly_finished], min=1.001)
+                alpha = torch.clamp(torch.log(z_mag) / (torch.log(z_prev_mag) + 1e-20), min=1.1)
+                nu = torch.log(torch.log(z_mag)) / torch.log(alpha)
+                
+                esc_subset = escaped[newly_finished]
+                val = torch.where(esc_subset, i + 1.0 - nu, torch.tensor(float(i), dtype=torch.float32, device=device))
+                img[newly_finished] = val
+                
+            mask = mask & ~finished
+            if not torch.any(mask):
+                break
+                
+            Z_prev2, Z_prev, Z = Z_prev.clone(), Z.clone(), Z_next
+            
+        img[mask] = max_iter
+    return img.cpu().numpy(), x.cpu().numpy(), y.cpu().numpy()
 
 def evaluate_rpn_numpy(rpn, Z, C):
     stack = []
@@ -638,7 +692,23 @@ def generate_fractal_pipeline(quality_res=1200, steps=10, progress_callback=None
         ymin, ymax = target_y - range_y/2, target_y + range_y/2
         
     final_max_iter = 500
-    log("COMPUTE", "GRID", f"Начат рендеринг высокого разрешения {quality_res}x{quality_res}, итераций: {final_max_iter}")
+
+    # --- НАЧАЛО ОПТИМИЗАЦИИ: Быстрое превью для ранней фильтрации ---
+    if progress_callback:
+        progress_callback("⚡ Анализ эстетической структуры кандидата...")
+        
+    preview_res = 200
+    preview_img, _, _ = safe_compute_grid(
+        xmin, xmax, ymin, ymax, preview_res, preview_res, final_max_iter, rpn_tokens, is_julia, c_val
+    )
+    preview_processed = apply_adaptive_tonemapping(preview_img, final_max_iter)
+    
+    if not check_aesthetic_quality(preview_processed):
+        log("WARN", "QUALITY", "Фрактал отклонён на стадии быстрого превью.")
+        return None, None
+    # --- КОНЕЦ ОПТИМИЗАЦИИ ---
+
+    log("COMPUTE", "GRID", f"Кандидат одобрен. Начат рендеринг высокого разрешения {quality_res}x{quality_res}")
     
     if progress_callback:
         progress_callback(f"🧬 Рендеринг в разрешении {quality_res}x{quality_res}...")
@@ -653,8 +723,9 @@ def generate_fractal_pipeline(quality_res=1200, steps=10, progress_callback=None
         progress_callback("🎨 Магическая цветовая фильтрация и тонирование...")
     processed_img = apply_adaptive_tonemapping(final_img, final_max_iter)
     
+    # Повторная проверка для высокого разрешения (на случай граничных эффектов)
     if not check_aesthetic_quality(processed_img):
-        log("WARN", "QUALITY", "Фрактал отклонён фильтром эстетического качества.")
+        log("WARN", "QUALITY", "Фрактал отклонён финальным фильтром качества.")
         return None, None
         
     fig = plt.figure(figsize=(12, 12), facecolor='black')
@@ -667,12 +738,8 @@ def generate_fractal_pipeline(quality_res=1200, steps=10, progress_callback=None
         plt.tight_layout()
         
         buf = io.BytesIO()
-        log("UPLOAD", "EXPORT", "Экспорт матрицы в оптимизированный JPEG (Quality: 92)...")
         plt.savefig(buf, format='jpeg', facecolor='black', edgecolor='none', bbox_inches='tight', pad_inches=0, dpi=100, pil_kwargs={'quality': 92, 'optimize': True})
         buf.seek(0)
-        
-        size_kb = len(buf.getvalue()) / 1024
-        log("UPLOAD", "EXPORT", f"Буфер готов. Точный размер файла: {size_kb:.1f} КБ.")
     finally:
         plt.close(fig)  
     
