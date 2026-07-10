@@ -832,7 +832,7 @@ def get_main_keyboard(chat_id):
 def heartbeat_loop():
     while True:
         try:
-            requests.get("https://yourusername.pythonanywhere.com/ping", timeout=10)
+            requests.get("https://MHPFan.pythonanywhere.com/ping", timeout=10)
         except Exception as e:
             log("WARN", "SYSTEM", f"Не удалось отправить пинг на сервер-наблюдатель: {e}")
         time.sleep(60)
