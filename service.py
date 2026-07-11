@@ -115,6 +115,41 @@ class StatsManager:
                     action TEXT
                 )
             """)
+            # Новая таблица для контроля дубликатов рассылки
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS broadcast_deliveries (
+                    epoch INTEGER,
+                    chat_id INTEGER,
+                    timestamp TEXT,
+                    PRIMARY KEY (epoch, chat_id)
+                )
+            """)
+            conn.commit()
+            conn.close()
+
+    def is_broadcast_delivered(self, epoch, chat_id):
+        """Проверяет, получал ли уже пользователь фрактал в текущую эпоху."""
+        with self.lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM broadcast_deliveries WHERE epoch = ? AND chat_id = ?",
+                (int(epoch), int(chat_id))
+            )
+            res = cursor.fetchone()
+            conn.close()
+            return res is not None
+
+    def record_broadcast_delivery(self, epoch, chat_id):
+        """Записывает факт успешной доставки фрактала пользователю в рамках эпохи."""
+        with self.lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(
+                "INSERT OR IGNORE INTO broadcast_deliveries (epoch, chat_id, timestamp) VALUES (?, ?, ?)",
+                (int(epoch), int(chat_id), now_str)
+            )
             conn.commit()
             conn.close()
 
@@ -1334,38 +1369,41 @@ def save_broadcast_state(state):
         except Exception as e:
             log("ERROR", "STORAGE", f"Ошибка сохранения состояния рассылки: {e}")
 
-def run_broadcast_distribution():
+def run_broadcast_distribution(epoch):
     subs = load_subscribers()
     if not subs:
         log("INFO", "AUTO", "Подписчиков для рассылки нет.")
         return {"status": "no_subscribers", "sent_count": 0}
         
-    log("INFO", "AUTO", f"Инициация рассылки для {len(subs)} пользователей...")
+    # Сначала проверяем, есть ли вообще пользователи, кому ещё НУЖНО отправить в эту эпоху
+    pending_users = [cid for cid in subs if not stats.is_broadcast_delivered(epoch, cid)]
+    if not pending_users:
+        log("INFO", "AUTO", f"Все подписчики уже получили рассылку для эпохи {epoch}. Новая генерация не требуется.")
+        return {"status": "success", "sent_count": 0}
+        
+    log("INFO", "AUTO", f"Инициация рассылки для {len(pending_users)} ожидающих пользователей (эпоха {epoch})...")
     buf_jpeg, buf_png, formula, coords = None, None, None, None
     
-    # ЭТАП 1: 15 попыток со строгим эстетическим фильтром и увеличенным таймаутом (300 секунд)
     for attempt in range(1, 16):
         try:
             buf_jpeg, buf_png, formula, coords = generate_fractal_pipeline(
                 quality_res=1600, 
                 steps=10, 
                 force_cpu=False, 
-                timeout=300.0  # Увеличенный таймаут для фонового процесса
+                timeout=300.0  
             )
             if buf_jpeg is not None:
                 break
         except TimeoutError:
             log("WARN", "AUTO", f"Попытка рассылки {attempt} прервана по таймауту.")
             
-    # ЭТАП 2: Резервный режим. Если строгий режим не справился, делаем 5 быстрых попыток 
-    # с пониженным разрешением и меньшим зумом (гарантированный рендер без таймаутов на CPU)
     if buf_jpeg is None:
         log("WARN", "AUTO", "Основная генерация не удалась. Запуск резервного режима с мягкими лимитами...")
         for attempt in range(1, 6):
             try:
                 buf_jpeg, buf_png, formula, coords = generate_fractal_pipeline(
-                    quality_res=1200,  # Облегченное разрешение для CPU
-                    steps=5,           # Меньше шагов зума — легче найти красивую точу
+                    quality_res=1200,  
+                    steps=5,           
                     force_cpu=False,
                     timeout=180.0
                 )
@@ -1374,11 +1412,10 @@ def run_broadcast_distribution():
             except TimeoutError:
                 pass
                 
-    # ЭТАП 3: Если даже резервный режим дал сбой, рассылаем атмосферные уведомления о задержке
     if buf_jpeg is None:
         log("ERROR", "AUTO", "Критический сбой генерации рассылки. Отправка уведомлений о задержке...")
         sent_notif = 0
-        for chat_id in list(subs):
+        for chat_id in pending_users:
             try:
                 user_lang = get_user_setting(chat_id, "lang", None) or get_user_lang(chat_id)
                 if user_lang == "ru":
@@ -1402,9 +1439,8 @@ def run_broadcast_distribution():
                 
         return {"status": "notified_delay", "sent_count": sent_notif}
         
-    # ЭТАП 4: Если фрактал успешно получен, рассылаем его всем подписчикам
     sent_success = 0
-    for chat_id in list(subs):
+    for chat_id in pending_users:
         try:
             buf_jpeg.seek(0)
             buf_png.seek(0)
@@ -1431,7 +1467,11 @@ def run_broadcast_distribution():
                 parse_mode='Markdown'
             )
             log("SUCCESS", "AUTO", f"Фрактал доставлен подписчику {chat_id} [Язык: {user_lang}].")
+            
+            # ЗАПИСЫВАЕМ УСПЕШНУЮ ОТПРАВКУ В БАЗУ ДАННЫХ
+            stats.record_broadcast_delivery(epoch, chat_id)
             sent_success += 1
+            
         except telebot.apihelper.ApiTelegramException as e:
             if e.error_code in [403, 400]:
                 log("WARN", "AUTO", f"Пользователь {chat_id} заблокировал бота. Удаление подписки.")
@@ -1468,7 +1508,8 @@ def automated_delivery_loop():
             if now >= current_scheduled_slot and last_sent < current_scheduled_slot:
                 log("INFO", "AUTO", f"Запуск рассылки за слот {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(current_scheduled_slot))}")
                 
-                run_broadcast_distribution()
+                # Передаем таймстамп текущего двухчасового интервала в качестве эпохи
+                run_broadcast_distribution(epoch=current_scheduled_slot)
                 
                 # Записываем завершение рассылки. Прошлые пропуски игнорируются для защиты от лавины отправки
                 state["last_broadcast_epoch"] = current_scheduled_slot
@@ -1511,11 +1552,11 @@ def get_main_keyboard(chat_id, lang="ru"):
 def heartbeat_loop():
     while True:
         try:
-            requests.get("https://MHPFan.pythonanywhere.com/ping", timeout=10)
+            # Таймаут увеличен до 30 секунд для компенсации холодного старта
+            requests.get("https://MHPFan.pythonanywhere.com/ping", timeout=30)
         except Exception as e:
             log("WARN", "SYSTEM", f"Не удалось отправить пинг на сервер-наблюдатель: {e}")
         time.sleep(60)
-
 
 # --- Telegram Bot Handlers ---
 @bot.message_handler(commands=['start', 'help', 'restart'])
@@ -2146,9 +2187,10 @@ def send_admin_report(message):
 
 # --- Обработчик ручного запуска рассылки ---
 def safe_run_manual_broadcast():
-    """Запускает рассылку в отдельном потоке и отправляет админу отчет с учетом новой логики."""
     try:
-        report = run_broadcast_distribution()
+        # Для ручной рассылки используем текущее уникальное время старта в качестве эпохи
+        manual_epoch = int(time.time())
+        report = run_broadcast_distribution(epoch=manual_epoch)
         
         if report["status"] == "success":
             msg = (
