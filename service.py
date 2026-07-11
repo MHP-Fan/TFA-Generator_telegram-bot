@@ -49,6 +49,16 @@ try:
             pass
         print(f"[Device] Успешная активация GPU: {torch.cuda.get_device_name(0)}")
         print("[Device] Тензорный CUDA-движок запущен.\n")
+        
+        # --- ЗАЩИТА ОТ ДЕДЛОКА: прогреваем CUDA на главном потоке ---
+        try:
+            dummy = torch.zeros(1, device=DEVICE)
+            del dummy
+            torch.cuda.empty_cache()
+            print("[Device] CUDA-контекст успешно прогрет на MainThread. Защита от дедлока активна.")
+        except Exception as e:
+            print(f"[Device] Предупреждение при прогреве CUDA: {e}")
+            
     else:
         DEVICE = torch.device('cpu')
         print("[Device] CUDA недоступна. Вычисления переведены на CPU PyTorch.\n")
@@ -193,7 +203,52 @@ class StatsManager:
 
 stats = StatsManager()
 
-# --- СЛОВАРЬ ЛОКАЛИЗАЦИИ (РУССКИЙ / ENGLISH) ---
+HELP_TEXT_RU = (
+    "👁‍⚙ **Фрактальный навигатор — справка**\n\n"
+    "Бот генерирует уникальные процедурные фракталы на основе математических формул. "
+    "Каждое изображение создаётся с нуля и проходит многоступенчатые эстетические тесты.\n\n"
+    "🎛 **Кнопки управления:**\n\n"
+    "🌌 *Малые расстояния* – стандартное погружение со случайным зумом (от 4 до 10 шагов). "
+    "Позволяет увидеть общие очертания и гармонию фрактала.\n\n"
+    "🌀 *Сверхглубокий зум* – глубокое погружение (от 15 до 30 шагов). "
+    "Исследует микроскопические детали в глубине хаоса. Требует больше ресурсов.\n\n"
+    "🧿 *Запустить бесконечный поток* – бот будет автоматически каждые 2 часа присылать вам новый фрактал.\n"
+    "⏳ *Остановить поток* – отключает автоматическую рассылку.\n\n"
+    "🔮 *Пакет из 3 / 5 фракталов* – последовательная генерация нескольких фракталов "
+    "(глубина зума настраивается в меню настроек).\n\n"
+    "✍️ *Свой фрактал* – позволяет вам ввести собственную формулу и диапазон координат для точного рендеринга.\n\n"
+    "⚙️ *Настройки* – параметры масштабирования для пакетного рендеринга.\n\n"
+    "❓ *Помощь* – показывает это сообщение.\n\n"
+    "⚙️ **Технические детали:**\n"
+    "• Каждая проекция выводит точные координаты и формулу, чтобы вы могли воспроизвести её позже!\n"
+    "• Одно вычисление длится не более 120 секунд.\n"
+    "• Между генерациями действует пауза 4 секунды.\n\n"
+    "Приятных погружений! 🌀"
+)
+
+HELP_TEXT_EN = (
+    "👁‍⚙ **Fractal Navigator — Help**\n\n"
+    "The bot generates unique procedural fractals using mathematical formulas. "
+    "Each image is rendered from scratch and passes multi-stage aesthetic evaluations.\n\n"
+    "🎛 **Control Keys:**\n\n"
+    "🌌 *Shallow Zoom* – standard dive with random zoom (4 to 10 steps). "
+    "Allows observing the general shape and harmony of the fractal.\n\n"
+    "🌀 *Deep Zoom* – deep dive (15 to 30 steps). "
+    "Explores microscopic details deep inside the chaos. Requires more resources.\n\n"
+    "🧿 *Start Infinite Stream* – the bot will automatically send you a new fractal every 2 hours.\n"
+    "⏳ *Stop Infinite Stream* – disables automated delivery.\n\n"
+    "🔮 *Batch of 3 / 5* – sequential generation of several fractals "
+    "(zoom depth can be configured in settings).\n\n"
+    "✍️ *Custom Fractal* – allows you to enter your own formula and coordinate range for exact rendering.\n\n"
+    "⚙️ *Settings* – scaling parameters for batch rendering and language settings.\n\n"
+    "❓ *Help* – shows this message.\n\n"
+    "⚙️ **Technical Details:**\n"
+    "• Each projection outputs precise coordinates and formula so you can replicate it later!\n"
+    "• One computation is limited to 120 seconds.\n"
+    "• There is a 4-second cooldown between manually requested generations.\n\n"
+    "Enjoy the dive! 🌀"
+)
+
 # --- СЛОВАРЬ ЛОКАЛИЗАЦИИ (РУССКИЙ / ENGLISH) ---
 TRANSLATIONS = {
     "ru": {
@@ -1451,75 +1506,6 @@ def get_main_keyboard(chat_id, lang="ru"):
     markup.row(btn_custom, btn_settings)
     markup.row(btn_help)
     return markup
-
-HELP_TEXT_RU = (
-    "👁‍⚙ **Фрактальный навигатор — справка**\n\n"
-    "Бот генерирует уникальные процедурные фракталы на основе математических формул. "
-    "Каждое изображение создаётся с нуля и проходит многоступенчатые эстетические тесты.\n\n"
-    "🎛 **Кнопки управления:**\n\n"
-    "🌌 *Малые расстояния* – стандартное погружение со случайным зумом (от 4 до 10 шагов). "
-    "Позволяет увидеть общие очертания и гармонию фрактала.\n\n"
-    "🌀 *Сверхглубокий зум* – глубокое погружение (от 15 до 30 шагов). "
-    "Исследует микроскопические детали в глубине хаоса. Требует больше ресурсов.\n\n"
-    "🧿 *Запустить бесконечный поток* – бот будет автоматически каждые 2 часа присылать вам новый фрактал.\n"
-    "⏳ *Остановить поток* – отключает автоматическую рассылку.\n\n"
-    "🔮 *Пакет из 3 / 5 фракталов* – последовательная генерация нескольких фракталов "
-    "(глубина зума настраивается в меню настроек).\n\n"
-    "✍️ *Свой фрактал* – позволяет вам ввести собственную формулу и диапазон координат для точного рендеринга.\n\n"
-    "⚙️ *Настройки* – параметры масштабирования для пакетного рендеринга.\n\n"
-    "❓ *Помощь* – показывает это сообщение.\n\n"
-    "⚙️ **Технические детали:**\n"
-    "• Каждая проекция выводит точные координаты и формулу, чтобы вы могли воспроизвести её позже!\n"
-    "• Одно вычисление длится не более 120 секунд.\n"
-    "• Между генерациями действует пауза 4 секунды.\n\n"
-    "Приятных погружений! 🌀"
-)
-
-HELP_TEXT_EN = (
-    "👁‍⚙ **Fractal Navigator — Help**\n\n"
-    "The bot generates unique procedural fractals using mathematical formulas. "
-    "Each image is rendered from scratch and passes multi-stage aesthetic evaluations.\n\n"
-    "🎛 **Control Keys:**\n\n"
-    "🌌 *Shallow Zoom* – standard dive with random zoom (4 to 10 steps). "
-    "Allows observing the general shape and harmony of the fractal.\n\n"
-    "🌀 *Deep Zoom* – deep dive (15 to 30 steps). "
-    "Explores microscopic details deep inside the chaos. Requires more resources.\n\n"
-    "🧿 *Start Infinite Stream* – the bot will automatically send you a new fractal every 2 hours.\n"
-    "⏳ *Stop Infinite Stream* – disables automated delivery.\n\n"
-    "🔮 *Batch of 3 / 5* – sequential generation of several fractals "
-    "(zoom depth can be configured in settings).\n\n"
-    "✍️ *Custom Fractal* – allows you to enter your own formula and coordinate range for exact rendering.\n\n"
-    "⚙️ *Settings* – scaling parameters for batch rendering and language settings.\n\n"
-    "❓ *Help* – shows this message.\n\n"
-    "⚙️ **Technical Details:**\n"
-    "• Each projection outputs precise coordinates and formula so you can replicate it later!\n"
-    "• One computation is limited to 120 seconds.\n"
-    "• There is a 4-second cooldown between manually requested generations.\n\n"
-    "Enjoy the dive! 🌀"
-)
-
-HELP_TEXT_EN = (
-    "👁‍⚙ **Fractal Navigator — Help**\n\n"
-    "The bot generates unique procedural fractals using mathematical formulas. "
-    "Each image is rendered from scratch and passes multi-stage aesthetic evaluations.\n\n"
-    "🎛 **Control Keys:**\n\n"
-    "🌌 *Shallow Zoom* – standard dive with random zoom (4 to 10 steps). "
-    "Allows observing the general shape and harmony of the fractal.\n\n"
-    "🌀 *Deep Zoom* – deep dive (15 to 30 steps). "
-    "Explores microscopic details deep inside the chaos. Requires more resources.\n\n"
-    "🧿 *Start Infinite Stream* – the bot will automatically send you a new fractal every 2 hours.\n"
-    "⏳ *Stop Infinite Stream* – disables automated delivery.\n\n"
-    "🔮 *Batch of 3 / 5* – sequential generation of several fractals "
-    "(zoom depth can be configured in settings).\n\n"
-    "✍️ *Custom Fractal* – allows you to enter your own formula and coordinate range for exact rendering.\n\n"
-    "⚙️ *Settings* – scaling parameters for batch rendering and language settings.\n\n"
-    "❓ *Help* – shows this message.\n\n"
-    "⚙️ **Technical Details:**\n"
-    "• Each projection outputs precise coordinates and formula so you can replicate it later!\n"
-    "• One computation is limited to 120 seconds.\n"
-    "• There is a 4-second cooldown between manually requested generations.\n\n"
-    "Enjoy the dive! 🌀"
-)
 
 # --- Система отправки пингов на облако (Наблюдатель) ---
 def heartbeat_loop():
