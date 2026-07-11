@@ -68,6 +68,7 @@ except ImportError:
 
 # --- Потокобезопасное логирование бэкенда ---
 log_lock = threading.Lock()
+render_lock = threading.Lock()  # Блокировка для тяжелых CUDA-вычислений
 
 def log(level, section, message):
     """Выводит структурированный лог в консоль."""
@@ -1331,9 +1332,11 @@ def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None
     if progress_callback:
         progress_callback(f"🧬 Рендеринг фрактала высокой точности ({target_res}x{target_res})...")
         
-    final_img, _, _ = safe_compute_grid(
-        xmin, xmax, ymin, ymax, render_res, render_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=True, deadline=deadline, force_cpu=force_cpu
-    )
+    # Захватываем блокировку только на время непосредственного расчета на видеокарте
+    with render_lock:
+        final_img, _, _ = safe_compute_grid(
+            xmin, xmax, ymin, ymax, render_res, render_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=True, deadline=deadline, force_cpu=force_cpu
+        )
     
     processed_img = apply_adaptive_tonemapping(final_img, final_max_iter)
     
@@ -1775,9 +1778,11 @@ def handle_custom_fractal_input(message):
         
         updater.update(t["rendering_high"].format(res=target_res))
         
-        final_img, _, _ = safe_compute_grid(
-            xmin, xmax, ymin, ymax, render_res, render_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=True
-        )
+        # Защищаем тяжелый рендер кастомных фракталов
+        with render_lock:
+            final_img, _, _ = safe_compute_grid(
+                xmin, xmax, ymin, ymax, render_res, render_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=True
+            )
         
         processed_img = apply_adaptive_tonemapping(final_img, final_max_iter)
         if processed_img is None:
