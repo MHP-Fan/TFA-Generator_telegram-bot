@@ -7,21 +7,31 @@ import hashlib
 import threading
 import signal  
 import sys
-import numpy as np
-import telebot
-from telebot import types
-from telebot import apihelper
-from PIL import Image  # Используем Pillow для пиксель-в-пиксель экспорта и SSAA-фильтрации
+import json
+import re
+import sqlite3
+from datetime import datetime
 
-# Отключаем GUI для Matplotlib
+# Отключаем GUI для Matplotlib перед импортом pyplot
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-# --- Глобальные таймауты для стабильного соединения ---
+import requests
+import urllib3
+import numpy as np
+import telebot
+from telebot import types
+from telebot import apihelper
+from PIL import Image  # Используем Pillow для SSAA-фильтрации и экспорта
+
+# --- Инициализация глобальных сетевых параметров ---
 apihelper.CONNECT_TIMEOUT = 90
 apihelper.READ_TIMEOUT = 90
+
+# Настройка ID администратора для просмотра статистики
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))  # Укажите ваш настоящий Telegram ID
 
 # --- Инициализация графического процессора (GPU / CUDA) ---
 HAS_TORCH = False
@@ -34,7 +44,6 @@ try:
         DEVICE = torch.device('cuda')
         torch.cuda.empty_cache()
         try:
-            # Аппаратное игнорирование денормализованных чисел (ускоряет глубокий зум)
             torch.set_flush_denormal(True)
         except Exception:
             pass
@@ -58,6 +67,161 @@ def log(level, section, message):
         print(f"[{timestamp}] [{level:<7}] [{thread_name}] [{section:<8}] {message}", flush=True)
 
 
+# --- Модуль аналитики и сбора статистики (SQLite) ---
+class StatsManager:
+    def __init__(self, db_path="bot_stats.db"):
+        self.db_path = db_path
+        self.lock = threading.Lock()
+        self._init_db()
+
+    def _get_connection(self):
+        return sqlite3.connect(self.db_path, check_same_thread=False, timeout=10)
+
+    def _init_db(self):
+        with self.lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    chat_id INTEGER PRIMARY KEY,
+                    join_date TEXT,
+                    is_active INTEGER DEFAULT 1
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS generations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER,
+                    timestamp TEXT,
+                    gen_type TEXT,
+                    steps INTEGER
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER,
+                    timestamp TEXT,
+                    action TEXT
+                )
+            """)
+            conn.commit()
+            conn.close()
+
+    def register_user(self, chat_id):
+        with self.lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(
+                "INSERT OR IGNORE INTO users (chat_id, join_date, is_active) VALUES (?, ?, 1)",
+                (chat_id, now_str)
+            )
+            cursor.execute("UPDATE users SET is_active = 1 WHERE chat_id = ?", (chat_id,))
+            conn.commit()
+            conn.close()
+
+    def log_generation(self, chat_id, gen_type, steps):
+        self.register_user(chat_id)
+        with self.lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(
+                "INSERT INTO generations (chat_id, timestamp, gen_type, steps) VALUES (?, ?, ?, ?)",
+                (chat_id, now_str, gen_type, steps)
+            )
+            conn.commit()
+            conn.close()
+
+    def log_subscription(self, chat_id, action):
+        self.register_user(chat_id)
+        with self.lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(
+                "INSERT INTO subscriptions (chat_id, timestamp, action) VALUES (?, ?, ?)",
+                (chat_id, now_str, action)
+            )
+            conn.commit()
+            conn.close()
+
+    def set_user_inactive(self, chat_id):
+        with self.lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET is_active = 0 WHERE chat_id = ?", (chat_id,))
+            conn.commit()
+            conn.close()
+
+    def get_weekly_report(self):
+        with self.lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT COUNT(*) FROM users")
+            total_users = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM users WHERE is_active = 1")
+            active_users = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM generations")
+            total_gens = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT gen_type, COUNT(*) FROM generations GROUP BY gen_type")
+            gen_distribution = dict(cursor.fetchall())
+            
+            cursor.execute("""
+                SELECT date(join_date), COUNT(*) 
+                FROM users 
+                WHERE join_date >= datetime('now', '-7 days')
+                GROUP BY date(join_date)
+                ORDER BY date(join_date) ASC
+            """)
+            user_growth_7d = cursor.fetchall()
+            
+            conn.close()
+            
+        return {
+            "total_users": total_users,
+            "active_users": active_users,
+            "total_generations": total_gens,
+            "gen_distribution": gen_distribution,
+            "user_growth_7d": user_growth_7d
+        }
+
+stats = StatsManager()
+
+
+# --- Сетевой слой с защитой от SSLEOFError и разрывов соединений ---
+def safe_api_call(func, *args, **kwargs):
+    """Выполняет вызов Telegram API с экспоненциальной задержкой при сбоях сети."""
+    retries = 3
+    backoff = 2.0
+    for attempt in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            err_str = str(e).lower()
+            is_transient = any(err in err_str for err in ["ssl", "connection", "timeout", "eof", "broken pipe", "max retries"])
+            if is_transient and attempt < retries - 1:
+                sleep_time = backoff ** (attempt + 1)
+                log("WARN", "NETWORK", f"Временный сбой API ({e}). Повтор через {sleep_time:.1f}с...")
+                time.sleep(sleep_time)
+                continue
+            raise e
+
+def safe_send_photo(chat_id, photo, **kwargs):
+    return safe_api_call(bot.send_photo, chat_id, photo, **kwargs)
+
+def safe_send_document(chat_id, document, **kwargs):
+    return safe_api_call(bot.send_document, chat_id, document, **kwargs)
+
+def safe_edit_message_text(text, chat_id, message_id, **kwargs):
+    return safe_api_call(bot.edit_message_text, text, chat_id, message_id, **kwargs)
+
+
 # --- Класс плавного обновления статуса в Telegram (Защита от HTTP 429) ---
 class ProgressUpdater:
     def __init__(self, bot, chat_id, message_id):
@@ -77,7 +241,7 @@ class ProgressUpdater:
             
             if force or (now - self.last_update_time >= 1.2):
                 try:
-                    self.bot.edit_message_text(text, self.chat_id, self.message_id, parse_mode='Markdown')
+                    safe_edit_message_text(text, self.chat_id, self.message_id, parse_mode='Markdown')
                     self.last_text = text
                     self.last_update_time = now
                 except Exception:
@@ -144,6 +308,44 @@ def remove_subscriber(chat_id):
             log("ERROR", "STORAGE", f"Не удалось удалить подписчика {chat_id}: {e}")
 
 
+# --- Менеджер настроек пользователей ---
+SETTINGS_FILE = "user_settings.json"
+settings_lock = threading.Lock()
+
+def load_settings():
+    if not os.path.exists(SETTINGS_FILE):
+        return {}
+    with settings_lock:
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+def save_user_setting(chat_id, key, value):
+    with settings_lock:
+        settings = {}
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    settings = json.load(f)
+            except Exception:
+                pass
+        str_id = str(chat_id)
+        if str_id not in settings:
+            settings[str_id] = {}
+        settings[str_id][key] = value
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            log("ERROR", "STORAGE", f"Не удалось сохранить настройки для {chat_id}: {e}")
+
+def get_user_setting(chat_id, key, default):
+    settings = load_settings()
+    return settings.get(str(chat_id), {}).get(key, default)
+
+
 # --- Менеджер состояний пользователей ---
 class UserManager:
     def __init__(self):
@@ -186,7 +388,6 @@ DEFAULT_PHRASES = [
 ]
 
 def load_phrases():
-    """Считывает дизайнерские фразы из файла phrases.txt. При отсутствии берет дефолтные."""
     if not os.path.exists(PHRASES_FILE):
         log("WARN", "SYSTEM", f"Файл {PHRASES_FILE} не найден. Используются встроенные фразы.")
         return DEFAULT_PHRASES
@@ -237,6 +438,7 @@ def get_classic_colormap():
 
 CLASSIC_CMAP = get_classic_colormap()
 
+
 # --- Декодирование процедурной грамматики ---
 class EntropyDecoder:
     def __init__(self, seed_int: int):
@@ -265,6 +467,7 @@ class EntropyDecoder:
         return val / 4294967296.0
 
 def generate_ast(decoder, depth, max_depth):
+    # Ограничиваем глубину дерева до 4, чтобы формулы оставались элегантными и сходящимися
     p_terminal = min(1.0, (depth - 1) / (max_depth - 1)) if depth > 1 else 0.0
     if decoder.get_float() < p_terminal:
         r = decoder.get_float()
@@ -276,13 +479,14 @@ def generate_ast(decoder, depth, max_depth):
             return {"type": "terminal", "opcode": CONST, "val": complex(real, imag)}
     else:
         r_op = decoder.get_float()
-        if r_op < 0.40:
+        if r_op < 0.35: # Unary
             op_list = [OP_SIN, OP_COS, OP_EXP, OP_LN, OP_ABS, OP_CONJ, OP_INV, OP_SIGM]
             op = op_list[decoder.get_next_byte() % len(op_list)]
             child = generate_ast(decoder, depth + 1, max_depth)
             return {"type": "unary", "opcode": op, "child": child}
-        else:
-            op_list = [OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_POW]
+        else: # Binary
+            # Дублируем умножение и сложение, чтобы ослабить деление и степени (снижает хаотичный шум)
+            op_list = [OP_ADD, OP_SUB, OP_MUL, OP_MUL, OP_DIV, OP_POW]
             op = op_list[decoder.get_next_byte() % len(op_list)]
             left = generate_ast(decoder, depth + 1, max_depth)
             right = generate_ast(decoder, depth + 1, max_depth)
@@ -303,7 +507,7 @@ def validate_rpn(rpn):
     has_z = any(t == 0 and op == VAR_Z for t, op, _ in rpn)
     has_c = any(t == 0 and op == VAR_C for t, op, _ in rpn)
     num_ops = sum(1 for t, _, _ in rpn if t in (1, 2))
-    return has_z and has_c and (num_ops >= 2)
+    return has_z and has_c and (num_ops >= 1)
 
 def rpn_to_str(rpn):
     stack = []
@@ -325,6 +529,109 @@ def rpn_to_str(rpn):
             arg1 = stack.pop()
             stack.append(f"({arg1}{op_syms[op]}{arg2})")
     return stack[0] if stack else "Z"
+
+
+# --- ПАРСЕР АЛГЕБРАИЧЕСКИХ ВЫРАЖЕНИЙ В RPN (Алгоритм Сортировочной Станции) ---
+def parse_infix_to_rpn(expr_str):
+    """Преобразует строку формулы пользователя в RPN-представление."""
+    expr_str = expr_str.replace(" ", "").replace("abs_rect", "abs")
+    
+    token_specification = [
+        ('COMPLEX', r'\d+(?:\.\d*)?[jJ]|\d+(?:\.\d*)?[\+\-]\d+(?:\.\d*)?[jJ]'), 
+        ('NUMBER',  r'\d+(?:\.\d*)?'),                                       
+        ('IDENT',   r'[a-zA-Z_][a-zA-Z0-9_]*'),                              
+        ('OP',      r'[\+\-\*\/\^\(\),]')                                    
+    ]
+    tok_regex = '|'.join(f'(?P<{name}>{pattern})' for name, pattern in token_specification)
+    tokens = []
+    for mo in re.finditer(tok_regex, expr_str):
+        tokens.append((mo.lastgroup, mo.group()))
+    
+    output = []
+    op_stack = []
+    
+    prec = {'+': 2, '-': 2, '*': 3, '/': 3, '^': 4}
+    assoc = {'+': 'L', '-': 'L', '*': 'L', '/': 'L', '^': 'R'}
+    funcs = {'sin', 'cos', 'exp', 'ln', 'abs', 'conj', 'inv', 'sigmoid'}
+    
+    prev_token_type = 'START'
+    
+    for kind, val in tokens:
+        if kind == 'NUMBER' or kind == 'COMPLEX':
+            c_val = complex(val.replace('j', 'j').replace('J', 'j')) if 'j' in val.lower() else complex(float(val))
+            output.append((0, CONST, c_val))
+            prev_token_type = 'NUMBER'
+        elif kind == 'IDENT':
+            val_lower = val.lower()
+            if val_lower == 'z':
+                output.append((0, VAR_Z, None))
+                prev_token_type = 'IDENT'
+            elif val_lower == 'c':
+                output.append((0, VAR_C, None))
+                prev_token_type = 'IDENT'
+            elif val_lower in funcs:
+                op_stack.append(('FUNC', val_lower))
+                prev_token_type = 'IDENT'
+            else:
+                raise ValueError(f"Неизвестная функция или переменная: {val}")
+        elif val == '(':
+            op_stack.append(('PAREN', '('))
+            prev_token_type = 'LPAREN'
+        elif val == ')':
+            while op_stack and op_stack[-1][1] != '(':
+                output.append(op_stack.pop())
+            if not op_stack:
+                raise ValueError("Несогласованные скобки")
+            op_stack.pop() 
+            if op_stack and op_stack[-1][0] == 'FUNC':
+                output.append(op_stack.pop())
+            prev_token_type = 'RPAREN'
+        elif val == ',':
+            while op_stack and op_stack[-1][1] != '(':
+                output.append(op_stack.pop())
+            prev_token_type = 'COMMA'
+        elif kind == 'OP':
+            is_unary = False
+            if val in ('+', '-'):
+                if prev_token_type in ('START', 'LPAREN', 'COMMA', 'OP'):
+                    is_unary = True
+            
+            if is_unary:
+                if val == '-':
+                    output.append((0, CONST, 0j))
+                    while (op_stack and op_stack[-1][0] == 'OP' and 
+                           (assoc['-'] == 'L' and prec['-'] <= prec.get(op_stack[-1][1], 0) or
+                            assoc['-'] == 'R' and prec['-'] < prec.get(op_stack[-1][1], 0))):
+                        output.append(op_stack.pop())
+                    op_stack.append(('OP', '-'))
+            else:
+                while (op_stack and op_stack[-1][0] == 'OP' and 
+                       (assoc[val] == 'L' and prec[val] <= prec.get(op_stack[-1][1], 0) or
+                        assoc[val] == 'R' and prec[val] < prec.get(op_stack[-1][1], 0))):
+                    output.append(op_stack.pop())
+                op_stack.append(('OP', val))
+            prev_token_type = 'OP'
+            
+    while op_stack:
+        top_type, top_val = op_stack.pop()
+        if top_val in ('(', ')'):
+            raise ValueError("Несогласованные скобки")
+        output.append((top_type, top_val))
+        
+    rpn_tokens = []
+    for item_type, item_val in output:
+        if item_type == 0:
+            rpn_tokens.append(item_val)
+        elif item_type == 'OP':
+            op_code = {'+': OP_ADD, '-': OP_SUB, '*': OP_MUL, '/': OP_DIV, '^': OP_POW}[item_val]
+            rpn_tokens.append((2, op_code, None))
+        elif item_type == 'FUNC':
+            op_code = {
+                'sin': OP_SIN, 'cos': OP_COS, 'exp': OP_EXP, 'ln': OP_LN,
+                'abs': OP_ABS, 'conj': OP_CONJ, 'inv': OP_INV, 'sigmoid': OP_SIGM
+            }[item_val]
+            rpn_tokens.append((1, op_code, None))
+    return rpn_tokens
 
 
 # --- Вычислительные интерпретаторы (с поддержкой динамической точности) ---
@@ -460,9 +767,8 @@ def compute_procedural_grid_pytorch(xmin, xmax, ymin, ymax, width, height, max_i
     
     with torch.no_grad():
         for i in range(max_iter):
-            # Аварийный выход по таймауту
             if deadline and time.time() > deadline:
-                raise TimeoutError("Превышен жесткий лимит времени вычислений (2 минуты).")
+                raise TimeoutError("Превышен жесткий лимит времени вычислений.")
                 
             Z_next = evaluate_rpn_pytorch(rpn, Z, C_param, device, use_double)
             mag_sq = Z_next.real**2 + Z_next.imag**2
@@ -513,9 +819,8 @@ def compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_ite
     R_esc_sq, eps_att_sq = 1e8, 1e-12
     
     for i in range(max_iter):
-        # Аварийный выход по таймауту
         if deadline and time.time() > deadline:
-            raise TimeoutError("Превышен жесткий лимит времени вычислений (2 минуты).")
+            raise TimeoutError("Превышен жесткий лимит времени вычислений.")
             
         Z_next = evaluate_rpn_numpy(rpn, Z, C_param, use_double)
         mag_sq = np.real(Z_next)**2 + np.imag(Z_next)**2
@@ -545,8 +850,8 @@ def compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_ite
     img[mask] = max_iter
     return img, x, y
 
-def safe_compute_grid(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double=False, deadline=None):
-    if HAS_TORCH and DEVICE.type == 'cuda':
+def safe_compute_grid(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double=False, deadline=None, force_cpu=False):
+    if HAS_TORCH and DEVICE.type == 'cuda' and not force_cpu:
         try:
             return compute_procedural_grid_pytorch(
                 xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, DEVICE, use_double, deadline
@@ -556,7 +861,6 @@ def safe_compute_grid(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_j
                 torch.cuda.empty_cache()
                 log("ERROR", "DEVICE", "Переполнение видеопамяти CUDA. Переход на CPU.")
     return compute_procedural_grid_numpy(xmin, xmax, ymin, ymax, width, height, max_iter, rpn, is_julia, c, use_double, deadline)
-
 
 # --- Навигация и контроль качества ---
 def find_boundary_point_v2(img, x, y, max_iter, rng):
@@ -626,11 +930,6 @@ def check_aesthetic_quality(processed_img):
 
 # --- Высококачественный пиксель-в-пиксель экспорт напрямую через PIL ---
 def export_to_buffers_pil(processed_img, cmap=None, target_res=1600):
-    """
-    Применяет палитру напрямую к массиву NumPy и возвращает два буфера:
-    1. Буфер JPEG (оптимизирован для быстрого inline-просмотра)
-    2. Буфер PNG (без сжатия, pixel-perfect для детального зума)
-    """
     if cmap is None:
         cmap = CLASSIC_CMAP
         
@@ -643,7 +942,7 @@ def export_to_buffers_pil(processed_img, cmap=None, target_res=1600):
     rgb_img = (rgba_img[:, :, :3] * 255.0).astype(np.uint8)
     img_pil = Image.fromarray(rgb_img)
     
-    # SSAA Даунсамплинг (Lanczos сглаживание)
+    # SSAA Даунсамплинг (Lanczos)
     if img_pil.width > target_res:
         img_pil = img_pil.resize((target_res, target_res), Image.Resampling.LANCZOS)
         
@@ -661,7 +960,7 @@ def export_to_buffers_pil(processed_img, cmap=None, target_res=1600):
 
 
 # --- Оптимизированный генератор фракталов с лимитом времени 2 минуты ---
-def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None):
+def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None, force_cpu=False):
     start_time = time.time()
     deadline = start_time + 120.0  # Жесткий лимит 120 секунд (2 минуты)
 
@@ -669,7 +968,7 @@ def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None
     seed_int = rng.randint(0, 2**128 - 1)
     
     decoder = EntropyDecoder(seed_int)
-    ast_tree = generate_ast(decoder, depth=1, max_depth=6) 
+    ast_tree = generate_ast(decoder, depth=1, max_depth=4) 
     rpn_tokens = []
     ast_to_rpn(ast_tree, rpn_tokens)
     
@@ -678,7 +977,7 @@ def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None
             raise TimeoutError("Таймаут безопасности превышен на этапе генерации RPN.")
         seed_int = rng.randint(0, 2**128 - 1)
         decoder = EntropyDecoder(seed_int)
-        ast_tree = generate_ast(decoder, depth=1, max_depth=6)
+        ast_tree = generate_ast(decoder, depth=1, max_depth=4)
         rpn_tokens = []
         ast_to_rpn(ast_tree, rpn_tokens)
         
@@ -694,9 +993,8 @@ def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None
         if progress_callback:
             progress_callback(f"🪐 Позиционирование зума (Шаг {step}/{steps})...")
         current_max_iter = 120 + step * 60
-        # Для шагов зума всегда используем быстрый float32
         img, x, y = safe_compute_grid(
-            xmin, xmax, ymin, ymax, 250, 250, current_max_iter, rpn_tokens, is_julia, c_val, use_double=False, deadline=deadline
+            xmin, xmax, ymin, ymax, 250, 250, current_max_iter, rpn_tokens, is_julia, c_val, use_double=False, deadline=deadline, force_cpu=force_cpu
         )
         target_x, target_y = find_boundary_point_v2(img, x, y, current_max_iter, rng)
         range_x, range_y = (xmax - xmin)/2.5, (ymax - ymin)/2.5
@@ -705,115 +1003,171 @@ def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None
         
     final_max_iter = 500
     
-    # --- БЫСТРЫЙ ПРЕВЬЮ ПАСС: Ранняя отбраковка (200x200, float32) ---
+    # --- БЫСТРЫЙ ПРЕВЬЮ ПАСС: Ранняя отбраковка ---
     if progress_callback:
         progress_callback("⚡ Проверка эстетического потенциала...")
     
     preview_res = 200
     preview_img, _, _ = safe_compute_grid(
-        xmin, xmax, ymin, ymax, preview_res, preview_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=False, deadline=deadline
+        xmin, xmax, ymin, ymax, preview_res, preview_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=False, deadline=deadline, force_cpu=force_cpu
     )
     preview_processed = apply_adaptive_tonemapping(preview_img, final_max_iter)
     
     if not check_aesthetic_quality(preview_processed):
         log("WARN", "QUALITY", "Фрактал отклонён на стадии быстрого превью.")
-        return None, None, None
+        return None, None, None, None
         
     # --- ФИНАЛЬНЫЙ РЕНДЕР (Адаптивные параметры качества) ---
-    # Если запущены на GPU, ставим повышенное качество и SSAA-фильтрацию. На CPU снижаем.
     if HAS_TORCH and DEVICE.type == 'cuda':
-        target_res = quality_res # 1600x1600
-        ssaa_factor = 1.5       # Рендерим 2400x2400
+        target_res = quality_res 
+        ssaa_factor = 1.5       
     else:
-        target_res = 1200       # Безопасное разрешение для CPU
-        ssaa_factor = 1.0       # Без SSAA во избежание таймаутов
+        target_res = 1200       
+        ssaa_factor = 1.0       
         
     render_res = int(target_res * ssaa_factor)
     
-    log("COMPUTE", "GRID", f"Начат рендеринг высокого разрешения {render_res}x{render_res} (Double Precision)...")
+    log("COMPUTE", "GRID", f"Начат рендеринг высокого разрешения {render_res}x{render_res}...")
     if progress_callback:
         progress_callback(f"🧬 Рендеринг фрактала высокой точности ({target_res}x{target_res})...")
         
-    # Финальный рендер требует double precision (use_double=True) для устранения блочной пикселизации
     final_img, _, _ = safe_compute_grid(
-        xmin, xmax, ymin, ymax, render_res, render_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=True, deadline=deadline
+        xmin, xmax, ymin, ymax, render_res, render_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=True, deadline=deadline, force_cpu=force_cpu
     )
     
     processed_img = apply_adaptive_tonemapping(final_img, final_max_iter)
     
     if not check_aesthetic_quality(processed_img):
         log("WARN", "QUALITY", "Фрактал отклонён финальным фильтром эстетического качества.")
-        return None, None, None
+        return None, None, None, None
         
-    # Экспорт в два формата
     buf_jpeg, buf_png = export_to_buffers_pil(processed_img, CLASSIC_CMAP, target_res=target_res)
-    return buf_jpeg, buf_png, formula_str
+    coords_dict = {"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax}
+    
+    return buf_jpeg, buf_png, formula_str, coords_dict
 
 
-# --- Автоматическая рассылка подписчикам ---
-def automated_delivery_loop():
-    while True:
-        # Автоматическая рассылка каждые 2 часа
-        time.sleep(7200)
-        
-        subs = load_subscribers()
-        if not subs: continue
-            
-        log("INFO", "AUTO", f"Начинаю автоматическую отправку фрактала для {len(subs)} подписчиков...")
+# --- Умный планировщик автоматической рассылки подписчикам ---
+BROADCAST_STATE_FILE = "broadcast_state.json"
+broadcast_lock = threading.Lock()
+
+def load_broadcast_state():
+    with broadcast_lock:
+        if not os.path.exists(BROADCAST_STATE_FILE):
+            return {"last_broadcast_epoch": 0.0}
         try:
-            buf_jpeg, buf_png, formula = None, None, None
-            for _ in range(15):  
-                try:
-                    buf_jpeg, buf_png, formula = generate_fractal_pipeline(quality_res=1600, steps=10)
-                    if buf_jpeg is not None:
-                        break
-                except TimeoutError:
-                    log("WARN", "AUTO", "Прервано по таймауту в цикле авто-генерации. Ищем дальше...")
-                    
-            if buf_jpeg is not None:
-                for chat_id in list(subs):
-                    try:
-                        buf_jpeg.seek(0)
-                        buf_png.seek(0)
-                        
-                        bot.send_photo(
-                            chat_id,
-                            buf_jpeg,
-                            caption=(
-                                "👁‍🗨 **Внеочередная материализация хаоса**\n\n"
-                                "Высший математический порядок пробился сквозь бесконечность.\n"
-                                f"Проекция уравнения эволюции:\n`{formula}`\n\n"
-                                "⏳ _Вы можете остановить этот поток в меню кнопкой в любой момент._"
-                            ),
-                            parse_mode='Markdown',
-                            timeout=90
-                        )
-                        
-                        buf_png.name = f"fractal_{secrets.token_hex(4)}.png"
-                        bot.send_document(
-                            chat_id,
-                            buf_png,
-                            caption="🖼️ **PNG-оригинал без сжатия (для детального зума)**",
-                            parse_mode='Markdown',
-                            timeout=90
-                        )
-                        log("SUCCESS", "AUTO", f"Фрактал доставлен подписчику {chat_id}.")
-                    except telebot.apihelper.ApiTelegramException as e:
-                        if e.error_code in [403, 400]:
-                            log("WARN", "AUTO", f"Пользователь {chat_id} заблокировал бота. Удаление подписки.")
-                            remove_subscriber(chat_id)
-                    except Exception as e:
-                        log("ERROR", "AUTO", f"Ошибка отправки пользователю {chat_id}: {e}")
-                buf_jpeg.close()
-                buf_png.close()
+            with open(BROADCAST_STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {"last_broadcast_epoch": 0.0}
+
+def save_broadcast_state(state):
+    with broadcast_lock:
+        try:
+            with open(BROADCAST_STATE_FILE, "w") as f:
+                json.dump(state, f)
         except Exception as e:
-            log("ERROR", "AUTO", f"Критическая ошибка рассылки: {e}")
+            log("ERROR", "STORAGE", f"Ошибка сохранения состояния рассылки: {e}")
+
+def run_broadcast_distribution():
+    subs = load_subscribers()
+    if not subs:
+        log("INFO", "AUTO", "Подписчиков для рассылки нет.")
+        return
+        
+    log("INFO", "AUTO", f"Инициация рассылки для {len(subs)} пользователей...")
+    buf_jpeg, buf_png, formula, coords = None, None, None, None
+    for _ in range(15):  
+        try:
+            buf_jpeg, buf_png, formula, coords = generate_fractal_pipeline(quality_res=1600, steps=10, force_cpu=True)
+            if buf_jpeg is not None:
+                break
+        except TimeoutError:
+            log("WARN", "AUTO", "Прервано по таймауту. Поиск новой сингулярности...")
+            
+    if buf_jpeg is not None:
+        for chat_id in list(subs):
+            try:
+                buf_jpeg.seek(0)
+                buf_png.seek(0)
+                
+                safe_send_photo(
+                    chat_id,
+                    buf_jpeg,
+                    caption=(
+                        "👁‍🗨 **Плановая материализация хаоса**\n\n"
+                        "Высший математический порядок пробил бесконечность.\n"
+                        f"Проекция уравнения:\n`{formula}`\n\n"
+                        f"Координаты:\n"
+                        f"`xmin = {coords['xmin']:.10f}`\n"
+                        f"`xmax = {coords['xmax']:.10f}`\n"
+                        f"`ymin = {coords['ymin']:.10f}`\n"
+                        f"`ymax = {coords['ymax']:.10f}`\n\n"
+                        "⏳ _Вы можете отключить поток в меню кнопкой в любой момент._"
+                    ),
+                    parse_mode='Markdown'
+                )
+                
+                buf_png.name = f"fractal_{secrets.token_hex(4)}.png"
+                safe_send_document(
+                    chat_id,
+                    buf_png,
+                    caption="🖼️ **PNG-оригинал без сжатия**",
+                    parse_mode='Markdown'
+                )
+                log("SUCCESS", "AUTO", f"Фрактал доставлен подписчику {chat_id}.")
+            except telebot.apihelper.ApiTelegramException as e:
+                if e.error_code in [403, 400]:
+                    log("WARN", "AUTO", f"Пользователь {chat_id} заблокировал бота. Удаление подписки.")
+                    remove_subscriber(chat_id)
+                    stats.set_user_inactive(chat_id)
+            except Exception as e:
+                log("ERROR", "AUTO", f"Ошибка отправки пользователю {chat_id}: {e}")
+            
+            # Троттлинг отправки: распределяем отправку во времени для предотвращения блокировок
+            time.sleep(0.25)
+            
+        buf_jpeg.close()
+        buf_png.close()
+
+def automated_delivery_loop():
+    INTERVAL = 7200 # 2 часа в секундах
+    while True:
+        try:
+            now = time.time()
+            state = load_broadcast_state()
+            last_sent = state.get("last_broadcast_epoch", 0.0)
+            
+            # Находим время текущего планового интервала
+            current_scheduled_slot = (now // INTERVAL) * INTERVAL
+            
+            # Инициализация при первом запуске
+            if last_sent == 0.0:
+                state["last_broadcast_epoch"] = current_scheduled_slot
+                save_broadcast_state(state)
+                last_sent = current_scheduled_slot
+            
+            # Если пропущен последний слот (даже если бот пропустил 2 и более интервалов)
+            if now >= current_scheduled_slot and last_sent < current_scheduled_slot:
+                log("INFO", "AUTO", f"Запуск рассылки за слот {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(current_scheduled_slot))}")
+                
+                run_broadcast_distribution()
+                
+                # Записываем завершение рассылки. Прошлые пропуски игнорируются для защиты от лавины отправки
+                state["last_broadcast_epoch"] = current_scheduled_slot
+                save_broadcast_state(state)
+                
+        except Exception as e:
+            log("ERROR", "AUTO", f"Критическая ошибка планировщика рассылки: {e}")
+            
+        time.sleep(30)
+
 
 # --- Динамический интерфейс ---
 def get_main_keyboard(chat_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    btn_gen = types.KeyboardButton("🌌 Раствориться в бесконечности")
-    btn_lucky = types.KeyboardButton("🌀 Я думаю мне повезёт")
+    btn_gen = types.KeyboardButton("🌌 Малые расстояния")
+    btn_lucky = types.KeyboardButton("🌀 Сверхглубокий зум")
     
     subs = load_subscribers()
     if chat_id in subs:
@@ -823,36 +1177,38 @@ def get_main_keyboard(chat_id):
         
     btn_batch3 = types.KeyboardButton("🔮 Сгенерировать пакет из 3 фракталов")
     btn_batch5 = types.KeyboardButton("🔮 Сгенерировать пакет из 5 фракталов")
+    btn_custom = types.KeyboardButton("✍️ Свой фрактал")
+    btn_settings = types.KeyboardButton("⚙️ Настройки")
     btn_help = types.KeyboardButton("❓ Помощь")
     
-    markup.row(btn_gen)
-    markup.row(btn_lucky)
-    markup.row(btn_sub)
+    markup.row(btn_gen, btn_lucky)
     markup.row(btn_batch3, btn_batch5)
+    markup.row(btn_sub)
+    markup.row(btn_custom, btn_settings)
     markup.row(btn_help)
     return markup
 
 HELP_TEXT = (
     "👁‍⚙ **Фрактальный навигатор — справка**\n\n"
-    "Бот генерирует уникальные процедурные фракталы на основе случайных математических формул. "
-    "Каждое изображение создаётся с нуля и проходит эстетический фильтр.\n\n"
+    "Бот генерирует уникальные процедурные фракталы на основе математических формул. "
+    "Каждое изображение создаётся с нуля и проходит многоступенчатые эстетические тесты.\n\n"
     "🎛 **Кнопки управления:**\n\n"
-    "🌌 *Раствориться в бесконечности* – обычное погружение со случайным зумом (от 4 до 10 шагов). "
-    "Даёт выразительные структуры среднего масштаба.\n\n"
-    "🌀 *Я думаю мне повезёт* – экстремальный глубокий зум (от 15 до 30 шагов). "
-    "Позволяет заглянуть в микроскопические детали, недоступные обычному взгляду. "
-    "Вычисления могут занимать больше времени (до 2 минут).\n\n"
-    "🧿 *Запустить бесконечный поток* – раз в 2 часа бот будет автоматически присылать вам новый фрактал.\n"
+    "🌌 *Малые расстояния* – стандартное погружение со случайным зумом (от 4 до 10 шагов). "
+    "Позволяет увидеть общие очертания и гармонию фрактала.\n\n"
+    "🌀 *Сверхглубокий зум* – глубокое погружение (от 15 до 30 шагов). "
+    "Исследует микроскопические детали в глубине хаоса. Требует больше ресурсов.\n\n"
+    "🧿 *Запустить бесконечный поток* – бот будет автоматически каждые 2 часа присылать вам новый фрактал.\n"
     "⏳ *Остановить поток* – отключает автоматическую рассылку.\n\n"
-    "🔮 *Пакет из 3 / 5 фракталов* – последовательная генерация сразу нескольких изображений "
-    "(отправляются только JPEG-превью для экономии трафика).\n\n"
+    "🔮 *Пакет из 3 / 5 фракталов* – последовательная генерация нескольких фракталов "
+    "(глубина зума настраивается в меню настроек).\n\n"
+    "✍️ *Свой фрактал* – позволяет вам ввести собственную формулу и диапазон координат для точного рендеринга.\n\n"
+    "⚙️ *Настройки* – параметры масштабирования для пакетного рендеринга.\n\n"
     "❓ *Помощь* – показывает это сообщение.\n\n"
     "⚙️ **Технические детали:**\n"
-    "• Одно вычисление длится не более 120 секунд (защита от зависаний).\n"
-    "• Между генерациями действует пауза 4 секунды.\n"
-    "• Для детального просмотра скачивайте PNG-файл, прикреплённый к каждому фракталу.\n"
-    "• При проблемах с ботом используйте /start для перезагрузки интерфейса.\n\n"
-    "Приятных погружений в бесконечность! 🌀"
+    "• Каждая проекция выводит точные координаты и формулу, чтобы вы могли воспроизвести её позже!\n"
+    "• Одно вычисление длится не более 120 секунд.\n"
+    "• Между генерациями действует пауза 4 секунды.\n\n"
+    "Приятных погружений! 🌀"
 )
 
 # --- Система отправки пингов на облако (Наблюдатель) ---
@@ -869,7 +1225,9 @@ def heartbeat_loop():
 @bot.message_handler(commands=['start', 'help', 'restart'])
 def send_welcome(message):
     try:
-        bot.send_message(
+        stats.register_user(message.chat.id)
+        safe_api_call(
+            bot.send_message,
             message.chat.id, 
             "«Однажды погрузившись в фрактал, ты больше никогда не остановишься. "
             "Позволь математике растворить тебя в бесконечности иррациональных чисел...»\n\n"
@@ -885,7 +1243,9 @@ def send_welcome(message):
 @bot.message_handler(func=lambda message: message.text == "❓ Помощь")
 def send_help(message):
     try:
-        bot.send_message(
+        stats.register_user(message.chat.id)
+        safe_api_call(
+            bot.send_message,
             message.chat.id,
             HELP_TEXT,
             reply_markup=get_main_keyboard(message.chat.id),
@@ -894,35 +1254,244 @@ def send_help(message):
     except Exception as e:
         log("ERROR", "TELEGRAM", f"Ошибка отправки справки: {e}")
 
-@bot.message_handler(func=lambda message: message.text == "🌌 Раствориться в бесконечности")
-@bot.message_handler(func=lambda message: message.text == "🌀 Я думаю мне повезёт")
+@bot.message_handler(func=lambda message: message.text == "⚙️ Настройки")
+def show_settings(message):
+    chat_id = message.chat.id
+    stats.register_user(chat_id)
+    mode = get_user_setting(chat_id, "zoom_mode", "shallow")
+    mode_text = "🌌 Малые расстояния" if mode == "shallow" else "🌀 Сверхглубокий зум"
+    
+    markup = types.InlineKeyboardMarkup()
+    btn_toggle = types.InlineKeyboardButton("🔄 Переключить масштаб пакетов", callback_data="toggle_zoom_mode")
+    markup.add(btn_toggle)
+    
+    safe_api_call(
+        bot.send_message,
+        chat_id,
+        f"⚙️ **Настройки фрактальной генерации**\n\n"
+        f"Текущий режим пакетного рендеринга: **{mode_text}**\n"
+        f"└ _Этот режим определяет глубину зума при создании пакетов из 3 или 5 фракталов._",
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "toggle_zoom_mode")
+def callback_toggle_zoom_mode(call):
+    chat_id = call.message.chat.id
+    current_mode = get_user_setting(chat_id, "zoom_mode", "shallow")
+    new_mode = "deep" if current_mode == "shallow" else "shallow"
+    save_user_setting(chat_id, "zoom_mode", new_mode)
+    
+    mode_text = "🌌 Малые расстояния" if new_mode == "shallow" else "🌀 Сверхглубокий зум"
+    
+    markup = types.InlineKeyboardMarkup()
+    btn_toggle = types.InlineKeyboardButton("🔄 Переключить масштаб пакетов", callback_data="toggle_zoom_mode")
+    markup.add(btn_toggle)
+    
+    try:
+        safe_edit_message_text(
+            f"⚙️ **Настройки фрактальной генерации**\n\n"
+            f"Текущий режим пакетного рендеринга: **{mode_text}**\n"
+            f"└ _Этот режим определяет глубину зума при создании пакетов из 3 или 5 фракталов._",
+            chat_id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode='Markdown'
+        )
+        bot.answer_callback_query(call.id, f"Режим изменен на {mode_text}!")
+    except Exception:
+        pass
+
+@bot.message_handler(func=lambda message: message.text == "✍️ Свой фрактал")
+def request_custom_fractal(message):
+    chat_id = message.chat.id
+    stats.register_user(chat_id)
+    safe_api_call(
+        bot.send_message,
+        chat_id,
+        "✍️ **Генерация собственного фрактала по формуле**\n\n"
+        "Задайте формулу в алгебраическом формате и (опционально) координаты.\n\n"
+        "**Пример ввода:**\n"
+        "```\n"
+        "Формула: (Z^2) + C\n"
+        "Координаты: -2.0, 2.0, -2.0, 2.0\n"
+        "```\n"
+        "или просто формула (координаты определятся автозумом):\n"
+        "```\n"
+        "Формула: cos(Z) * C\n"
+        "```\n"
+        "**Переменные:** `Z`, `C` (комплексные числа)\n"
+        "**Функции:** `sin`, `cos`, `exp`, `ln`, `abs`, `conj`, `inv`, `sigmoid`\n"
+        "**Операторы:** `+`, `-`, `*`, `/`, `^` (степень)\n\n"
+        "Пришлите ваши параметры ответным сообщением (reply) на это сообщение.",
+        parse_mode='Markdown',
+        reply_markup=types.ForceReply(selective=True)
+    )
+
+@bot.message_handler(func=lambda msg: msg.reply_to_message and "Пришлите ваши параметры ответным сообщением" in msg.reply_to_message.text)
+def handle_custom_fractal_input(message):
+    chat_id = message.chat.id
+    text = message.text
+    
+    formula_str = None
+    coords_tuple = None
+    
+    lines = text.split("\n")
+    for line in lines:
+        if "Формула:" in line:
+            formula_str = line.split("Формула:")[1].strip()
+        elif "Координаты:" in line:
+            coords_str = line.split("Координаты:")[1].strip()
+            try:
+                coords_tuple = tuple(map(float, coords_str.replace(" ", "").split(",")))
+            except Exception:
+                pass
+                
+    if not formula_str:
+        formula_str = text.strip()
+    
+    if coords_tuple and len(coords_tuple) != 4:
+        coords_tuple = None
+        
+    try:
+        rpn_tokens = parse_infix_to_rpn(formula_str)
+        if not validate_rpn(rpn_tokens):
+            raise ValueError("Формула должна содержать как минимум переменные Z и C, а также оператор.")
+    except Exception as e:
+        safe_api_call(
+            bot.send_message,
+            chat_id,
+            f"❌ **Ошибка разбора формулы:**\n`{str(e)}`\n\n"
+            f"Попробуйте еще раз. Пример корректной записи: `(Z^2) + C`",
+            parse_mode='Markdown'
+        )
+        return
+        
+    status, val = user_manager.try_start_job(chat_id)
+    if status == "busy":
+        safe_api_call(bot.send_message, chat_id, "⚠️ Вычисления уже запущены...")
+        return
+    elif status == "cooldown":
+        safe_api_call(bot.send_message, chat_id, f"⏳ Подождите {val:.1f} сек...")
+        return
+        
+    try:
+        status_msg = safe_api_call(bot.send_message, chat_id, "🧬 Математическое ядро обрабатывает вашу формулу...")
+        updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
+        
+        if coords_tuple:
+            xmin, xmax, ymin, ymax = coords_tuple
+            steps = 0 
+        else:
+            xmin, xmax, ymin, ymax = -2.0, 2.0, -2.0, 2.0
+            steps = 6 
+            
+        is_julia = False 
+        c_val = 0j
+        
+        if steps > 0:
+            rng = random.Random(secrets.randbits(128))
+            updater.update("🧬 Поиск эстетически выразительной области...")
+            for step in range(1, steps + 1):
+                current_max_iter = 120 + step * 60
+                img, x, y = safe_compute_grid(
+                    xmin, xmax, ymin, ymax, 250, 250, current_max_iter, rpn_tokens, is_julia, c_val, use_double=False
+                )
+                target_x, target_y = find_boundary_point_v2(img, x, y, current_max_iter, rng)
+                range_x, range_y = (xmax - xmin)/2.5, (ymax - ymin)/2.5
+                xmin, xmax = target_x - range_x/2, target_x + range_x/2
+                ymin, ymax = target_y - range_y/2, target_y + range_y/2
+        
+        final_max_iter = 500
+        target_res = 1600 if (HAS_TORCH and DEVICE.type == 'cuda') else 1200
+        ssaa_factor = 1.5 if (HAS_TORCH and DEVICE.type == 'cuda') else 1.0
+        render_res = int(target_res * ssaa_factor)
+        
+        updater.update(f"🪐 Финальный рендеринг высокой точности ({target_res}x{target_res})...")
+        
+        final_img, _, _ = safe_compute_grid(
+            xmin, xmax, ymin, ymax, render_res, render_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=True
+        )
+        
+        processed_img = apply_adaptive_tonemapping(final_img, final_max_iter)
+        if processed_img is None:
+            processed_img = np.nan_to_num(final_img)
+            
+        buf_jpeg, buf_png = export_to_buffers_pil(processed_img, CLASSIC_CMAP, target_res=target_res)
+        
+        try:
+            bot.delete_message(chat_id, status_msg.message_id)
+        except Exception:
+            pass
+        
+        safe_send_photo(
+            chat_id, 
+            buf_jpeg, 
+            caption=(
+                f"🎨 **Ваш кастомный фрактал готов!**\n\n"
+                f"Формула:\n`{formula_str}`\n\n"
+                f"Координаты:\n"
+                f"`xmin = {xmin:.10f}`\n"
+                f"`xmax = {xmax:.10f}`\n"
+                f"`ymin = {ymin:.10f}`\n"
+                f"`ymax = {ymax:.10f}`"
+            ), 
+            parse_mode='Markdown',
+            reply_markup=get_main_keyboard(chat_id)
+        )
+        
+        buf_png.name = f"custom_fractal_{secrets.token_hex(4)}.png"
+        safe_send_document(
+            chat_id,
+            buf_png,
+            caption="🖼️ **PNG-оригинал без сжатия (для детального зума)**",
+            parse_mode='Markdown'
+        )
+        
+        buf_jpeg.close()
+        buf_png.close()
+        
+        stats.log_generation(chat_id, "custom", final_max_iter)
+        
+    except Exception as e:
+        log("ERROR", "CUSTOM_RENDER", f"Ошибка при кастомном рендере: {e}")
+        safe_api_call(bot.send_message, chat_id, f"❌ Ошибка генерации: {str(e)}", reply_markup=get_main_keyboard(chat_id))
+    finally:
+        user_manager.end_job(chat_id)
+
+@bot.message_handler(func=lambda message: message.text == "🌌 Малые расстояния")
+@bot.message_handler(func=lambda message: message.text == "🌀 Сверхглубокий зум")
 @bot.message_handler(commands=['generate'])
 def send_fractal(message):
     chat_id = message.chat.id
+    username = message.from_user.username or "NoUsername"
+    
+    # Непосредственное логирование факта нажатия кнопки пользователем
+    log("INFO", "TELEGRAM", f"Пользователь {chat_id} (@{username}) запросил генерацию: '{message.text}'")
 
-    # --- ВЫБОР ГЛУБИНЫ ---
-    if "повезёт" in message.text:
+    if "Сверхглубокий" in message.text:
         steps_min, steps_max = 15, 30
-        mode_text = "🌀 Сверхглубокий зум"
+        mode_text = "🌀 Сверхглубокий масштаб"
+        gen_type = "deep"
     else:
         steps_min, steps_max = 4, 10
-        mode_text = "🌌 Стандартное погружение"
-    # -----------------------
+        mode_text = "🌌 Малые расстояния"
+        gen_type = "shallow"
 
     status, val = user_manager.try_start_job(chat_id)
     if status == "busy":
-        bot.send_message(chat_id, "⚠️ Вычисления уже запущены...")
+        safe_api_call(bot.send_message, chat_id, "⚠️ Вычисления уже запущены...")
         return
     elif status == "cooldown":
-        bot.send_message(chat_id, f"⏳ Подождите {val:.1f} сек...")
+        safe_api_call(bot.send_message, chat_id, f"⏳ Подождите {val:.1f} сек...")
         return
 
     try:
         random_steps = random.randint(steps_min, steps_max)
-        status_msg = bot.send_message(chat_id, f"{mode_text} на {random_steps} шагов...")
+        status_msg = safe_api_call(bot.send_message, chat_id, f"{mode_text} на {random_steps} шагов...")
         updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
         
-        buf_jpeg, buf_png, formula = None, None, None
+        buf_jpeg, buf_png, formula, coords = None, None, None, None
         max_attempts = 15
         
         for attempt in range(1, max_attempts + 1):
@@ -932,18 +1501,16 @@ def send_fractal(message):
             updater.update(f"🧬 *Попытка {attempt}/{max_attempts}*\n└ Инициализация матрицы...", force=True)
             
             try:
-                buf_jpeg, buf_png, formula = generate_fractal_pipeline(
+                buf_jpeg, buf_png, formula, coords = generate_fractal_pipeline(
                     quality_res=1600, 
-                    steps=10, 
+                    steps=random_steps, 
                     progress_callback=make_callback(attempt)
                 )
             except TimeoutError as te:
                 log("ERROR", "TIMEOUT", f"Таймаут вычислений на попытке {attempt}: {te}")
-                # Если это была последняя попытка, пробрасываем ошибку дальше
                 if attempt == max_attempts:
                     raise te
-                # Иначе пишем пользователю и пробуем другую координату
-                updater.update(f"⚠️ *Попытка {attempt}/{max_attempts}* прервана по таймауту (2 минуты). Ищем другую сингулярность...", force=True)
+                updater.update(f"⚠️ *Попытка {attempt}/{max_attempts}* прервана по таймауту. Пересчет сингулярности...", force=True)
                 time.sleep(1.0)
                 continue
             
@@ -952,13 +1519,13 @@ def send_fractal(message):
             else:
                 updater.update(
                     f"⚠️ *Попытка {attempt}/{max_attempts}* отклонена.\n"
-                    f"└ _Точка поля не рекомендована к визуализации (низкая эстетика). Ищем новую сингулярность..._",
+                    f"└ _Точка поля не рекомендована к визуализации. Ищем новую область..._",
                     force=True
                 )
                 time.sleep(1.0)
         
         if buf_jpeg is None:
-            updater.update("👁‍⚙ Математический хаос оказался слишком неустойчив. Повторите попытку прорыва.", force=True)
+            updater.update("👁‍⚙ Математический хаос оказался слишком неустойчив. Повторите попытку.", force=True)
             return
             
         try:
@@ -966,44 +1533,47 @@ def send_fractal(message):
         except Exception:
             pass
         
-        # 1. Отправляем быстрое превью в виде обычной сжатой фотографии
         log("UPLOAD", "TELEGRAM", f"Отправка превью-фото {chat_id}...")
-        bot.send_photo(
+        safe_send_photo(
             chat_id, 
             buf_jpeg, 
             caption=(
                 f"🔮 **Погружение совершено.**\n\n"
                 f"Хаос упорядочен формулой:\n`{formula}`\n\n"
+                f"Координаты:\n"
+                f"`xmin = {coords['xmin']:.10f}`\n"
+                f"`xmax = {coords['xmax']:.10f}`\n"
+                f"`ymin = {coords['ymin']:.10f}`\n"
+                f"`ymax = {coords['ymax']:.10f}`\n\n"
                 f"{get_random_phrase()}"
             ), 
             parse_mode='Markdown',
-            reply_markup=get_main_keyboard(chat_id),
-            timeout=90
+            reply_markup=get_main_keyboard(chat_id)
         )
         
-        # 2. Следом отправляем оригинальный файл PNG без сжатия в виде Документа
         log("UPLOAD", "TELEGRAM", f"Отправка оригинального PNG-файла {chat_id}...")
         buf_png.name = f"fractal_{secrets.token_hex(4)}.png"
-        bot.send_document(
+        safe_send_document(
             chat_id,
             buf_png,
-            caption="🖼️ **Оригинальная проекция (PNG, без сжатия)**\n└ _Скачайте файл, чтобы рассмотреть микродетали без артефактов зума._",
-            parse_mode='Markdown',
-            timeout=90
+            caption="🖼️ **Оригинальная проекция (PNG, без сжатия)**\n└ _Скачайте файл, чтобы рассмотреть микродетали без артефактов._",
+            parse_mode='Markdown'
         )
         
-        log("SUCCESS", "TELEGRAM", f"Фрактал успешно доставлен пользователю {chat_id} в обоих форматах.")
         buf_jpeg.close()
         buf_png.close()
+        
+        stats.log_generation(chat_id, gen_type, random_steps)
         
     except TimeoutError:
         log("ERROR", "TELEGRAM", f"Генерация для {chat_id} полностью остановлена из-за превышения лимита времени.")
         try:
-            bot.send_message(
+            safe_api_call(
+                bot.send_message, 
                 chat_id, 
                 "⚠️ **Вычисления прерваны по таймауту (2 минуты).**\n\n"
-                "Генерируемое фрактальное уравнение оказалось математически слишком ресурсоемким. "
-                "Ваша сессия была завершена во избежание зависания сервера. Пожалуйста, попробуйте снова.",
+                "Генерируемое уравнение оказалось слишком ресурсоемким. "
+                "Сессия была перезапущена во избежание перегрузки сервера.",
                 reply_markup=get_main_keyboard(chat_id)
             )
         except Exception:
@@ -1012,10 +1582,11 @@ def send_fractal(message):
         if te.error_code in [403, 400]:
             log("WARN", "TELEGRAM", f"Пользователь {chat_id} заблокировал бота. Удаление подписки.")
             remove_subscriber(chat_id)
+            stats.set_user_inactive(chat_id)
     except Exception as e:
         log("ERROR", "TELEGRAM", f"Сбой отправки: {e}")
         try:
-            bot.send_message(chat_id, f"❌ Произошел сбой при генерации фрактала: {str(e)}", reply_markup=get_main_keyboard(chat_id))
+            safe_api_call(bot.send_message, chat_id, f"❌ Произошел сбой при генерации фрактала: {str(e)}", reply_markup=get_main_keyboard(chat_id))
         except Exception:
             pass
     finally:
@@ -1028,14 +1599,18 @@ def toggle_subscription(message):
     try:
         if "Запустить" in message.text or message.text == "/subscribe":
             save_subscriber(chat_id)
-            bot.send_message(
+            stats.log_subscription(chat_id, "subscribe")
+            safe_api_call(
+                bot.send_message,
                 chat_id, 
-                "👁‍⚙ **Поток запущен.**\n\nКаждые два часа математическое ядро будет проецировать новую случайную структуру высокой точности прямо в ваше сознание.",
+                "👁‍⚙ **Поток запущен.**\n\nКаждые два часа математическое ядро будет автоматически проецировать новую случайную структуру высокой точности.",
                 reply_markup=get_main_keyboard(chat_id)
             )
         else:
             remove_subscriber(chat_id)
-            bot.send_message(
+            stats.log_subscription(chat_id, "unsubscribe")
+            safe_api_call(
+                bot.send_message, 
                 chat_id, 
                 "⏳ **Поток приостановлен.**\n\nБесконечность отпускает вас... до следующего ручного погружения.",
                 reply_markup=get_main_keyboard(chat_id)
@@ -1046,38 +1621,52 @@ def toggle_subscription(message):
 @bot.message_handler(func=lambda message: message.text.startswith("🔮 Сгенерировать пакет"))
 def send_batch_fractal(message):
     chat_id = message.chat.id
+    username = message.from_user.username or "NoUsername"
     num = 5 if "5" in message.text else 3
+    
+    # Логирование старта пакетной обработки
+    log("INFO", "TELEGRAM", f"Пользователь {chat_id} (@{username}) запросил пакет из {num} фракталов")
     
     status, val = user_manager.try_start_job(chat_id)
     if status == "busy":
         try:
-            bot.send_message(chat_id, "⚠️ Идет рендеринг предыдущего пакета. Пожалуйста, подождите.")
+            safe_api_call(bot.send_message, chat_id, "⚠️ Идет рендеринг предыдущего пакета. Пожалуйста, подождите.")
         except Exception:
             pass
         return
     elif status == "cooldown":
         try:
-            bot.send_message(chat_id, f"⏳ Система охлаждается. Попробуйте снова через {val:.1f} сек.")
+            safe_api_call(bot.send_message, chat_id, f"⏳ Система охлаждается. Попробуйте снова через {val:.1f} сек.")
         except Exception:
             pass
         return
 
-    # Защищенный try...finally блок для пакетного рендера
     try:
-        status_msg = bot.send_message(
+        # Считываем сохраненный режим глубины из настроек пользователя
+        zoom_mode = get_user_setting(chat_id, "zoom_mode", "shallow")
+        if zoom_mode == "deep":
+            steps_min, steps_max = 15, 30
+            mode_desc = "Сверхглубокий зум"
+        else:
+            steps_min, steps_max = 4, 10
+            mode_desc = "Малые расстояния"
+            
+        status_msg = safe_api_call(
+            bot.send_message, 
             chat_id, 
-            f"🧬 Инициация каскадного пакета ({num} фрактальных проекций)...\nМатрицы рассчитываются последовательно на CUDA-ядрах."
+            f"🧬 Инициация пакетного рендеринга ({num} проекций).\nРежим масштабирования: **{mode_desc}**.\nРасчёты проводятся последовательно."
         )
-        log("INFO", "TELEGRAM", f"Пользователь {chat_id} запросил пакет из {num} фракталов.")
+        log("INFO", "TELEGRAM", f"Пользователь {chat_id} запросил пакет из {num} фракталов (режим: {zoom_mode}).")
         
         updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
         generated = 0
         
         for i in range(num):
-            buf_jpeg, buf_png, formula = None, None, None
+            buf_jpeg, buf_png, formula, coords = None, None, None, None
             max_attempts = 15
             
             for attempt in range(1, max_attempts + 1):
+                random_steps = random.randint(steps_min, steps_max)
                 def make_batch_callback(index, att):
                     return lambda text: updater.update(
                         f"🪐 *Фрактал {index+1} из {num}*\n"
@@ -1091,16 +1680,16 @@ def send_batch_fractal(message):
                 )
                 
                 try:
-                    buf_jpeg, buf_png, formula = generate_fractal_pipeline(
+                    buf_jpeg, buf_png, formula, coords = generate_fractal_pipeline(
                         quality_res=1600, 
-                        steps=10, 
+                        steps=random_steps, 
                         progress_callback=make_batch_callback(i, attempt)
                     )
                 except TimeoutError:
                     log("WARN", "TIMEOUT", f"Пакет: Фрактал {i+1} на попытке {attempt} прерван по таймауту.")
                     if attempt == max_attempts:
                         break
-                    updater.update(f"⚠️ *Фрактал {i+1} из {num}* (Таймаут). Пробуем другую сингулярность...", force=True)
+                    updater.update(f"⚠️ *Фрактал {i+1} из {num}* (Таймаут). Пересчет сингулярности...", force=True)
                     time.sleep(1.0)
                     continue
                 
@@ -1109,7 +1698,7 @@ def send_batch_fractal(message):
                 else:
                     updater.update(
                         f"⚠️ *Фрактал {i+1} из {num}* (Попытка {attempt} отклонена)\n"
-                        f"└ _Хаотическая область нестабильна. Пересчет сингулярности..._",
+                        f"└ _Пересчет сингулярности..._",
                         force=True
                     )
                     time.sleep(1.0)
@@ -1117,27 +1706,34 @@ def send_batch_fractal(message):
             if buf_jpeg is not None:
                 try:
                     log("UPLOAD", "TELEGRAM", f"Отправка кадра {i+1}/{num} пользователю {chat_id}...")
-                    # В пакетах отправляем только JPEG-версии, чтобы не спамить чат файлами
-                    bot.send_photo(
+                    safe_send_photo(
                         chat_id,
                         buf_jpeg,
-                        caption=f"✨ **Фрактальный слой #{i+1}**\n\nТрансцендентное уравнение эволюции:\n`{formula}`",
-                        parse_mode='Markdown',
-                        timeout=90
+                        caption=(
+                            f"✨ **Фрактальный слой #{i+1}**\n\n"
+                            f"Уравнение эволюции:\n`{formula}`\n\n"
+                            f"Координаты:\n"
+                            f"`xmin = {coords['xmin']:.8f}`\n"
+                            f"`xmax = {coords['xmax']:.8f}`\n"
+                            f"`ymin = {coords['ymin']:.8f}`\n"
+                            f"`ymax = {coords['ymax']:.8f}`"
+                        ),
+                        parse_mode='Markdown'
                     )
-                    log("SUCCESS", "TELEGRAM", f"Кадр {i+1}/{num} успешно доставлен пользователю {chat_id}.")
+                    log("SUCCESS", "TELEGRAM", f"Кадр {i+1}/{num} успешно доставлен.")
                     generated += 1
                 except telebot.apihelper.ApiTelegramException as te:
                     if te.error_code in [403, 400]:
-                        log("WARN", "TELEGRAM", f"Пользователь {chat_id} заблокировал бота во время пакетного рендеринга. Генерация прервана.")
+                        log("WARN", "TELEGRAM", f"Пользователь {chat_id} заблокировал бота. Генерация пакета прервана.")
                         remove_subscriber(chat_id)
+                        stats.set_user_inactive(chat_id)
                         break  
                 except Exception as e:
                     log("ERROR", "TELEGRAM", f"Ошибка отправки кадра {i+1} пакета: {e}")
                 finally:
                     buf_jpeg.close()
                     buf_png.close()
-                time.sleep(1)
+                time.sleep(1.0)
                 
         try:
             bot.delete_message(chat_id, status_msg.message_id)
@@ -1145,34 +1741,102 @@ def send_batch_fractal(message):
             pass
             
         if generated == 0:
-            bot.send_message(chat_id, "❌ Не удалось пробиться сквозь хаос. Матрица пуста.", reply_markup=get_main_keyboard(chat_id))
+            safe_api_call(bot.send_message, chat_id, "❌ Не удалось пробиться сквозь хаос. Проекции не построены.", reply_markup=get_main_keyboard(chat_id))
         else:
-            bot.send_message(chat_id, "🔮 **Каскадный перенос завершен.** Вы растворились во множестве решений.", reply_markup=get_main_keyboard(chat_id))
+            safe_api_call(bot.send_message, chat_id, "🔮 **Пакетный перенос завершен.** Все проекции визуализированы.", reply_markup=get_main_keyboard(chat_id))
+            stats.log_generation(chat_id, f"batch_{zoom_mode}", num)
             
     except Exception as e:
         log("ERROR", "TELEGRAM", f"Критическая ошибка пакетной генерации {chat_id}: {e}")
         try:
-            bot.send_message(chat_id, f"❌ Произошел сетевой или вычислительный сбой при генерации пакета: {str(e)}", reply_markup=get_main_keyboard(chat_id))
+            safe_api_call(bot.send_message, chat_id, f"❌ Произошел сбой при генерации пакета: {str(e)}", reply_markup=get_main_keyboard(chat_id))
         except Exception:
             pass
     finally:
         user_manager.end_job(chat_id)
 
+
+# --- Админ-панель для визуализации аналитики ---
+@bot.message_handler(commands=['admin_stats'])
+def send_admin_report(message):
+    if message.chat.id != ADMIN_ID:
+        return 
+        
+    report = stats.get_weekly_report()
+    
+    text = (
+        "📊 **Фрактальный Навигатор: Аналитика**\n\n"
+        f"👥 Всего пользователей в БД: `{report['total_users']}`\n"
+        f"🟢 Активных сессий: `{report['active_users']}`\n"
+        f"🌀 Всего генераций фракталов: `{report['total_generations']}`\n\n"
+        "📈 **Популярность режимов:**\n"
+    )
+    for g_type, count in report['gen_distribution'].items():
+        text += f"• `{g_type}`: {count} раз(а)\n"
+        
+    dates = [item[0] for item in report['user_growth_7d']]
+    counts = [item[1] for item in report['user_growth_7d']]
+    
+    if dates:
+        plt.figure(figsize=(6, 4))
+        plt.plot(dates, counts, marker='o', color='#2269eb', linewidth=2)
+        plt.title("Рост аудитории (последние 7 дней)", fontsize=10)
+        plt.xlabel("Дата", fontsize=8)
+        plt.ylabel("Новые пользователи", fontsize=8)
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.xticks(rotation=30)
+        plt.tight_layout()
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=150)
+        buf.seek(0)
+        plt.close()
+        
+        safe_send_photo(ADMIN_ID, buf, caption=text, parse_mode='Markdown')
+        buf.close()
+    else:
+        safe_api_call(bot.send_message, ADMIN_ID, text + "\n_Данных для построения графика пока недостаточно._", parse_mode='Markdown')
+
+# --- Обработчик ручного запуска рассылки ---
+def safe_run_manual_broadcast():
+    """Запускает рассылку в отдельном потоке с отловом исключений."""
+    try:
+        run_broadcast_distribution()
+        safe_api_call(bot.send_message, ADMIN_ID, "✅ Ручная рассылка успешно завершена.")
+    except Exception as e:
+        log("ERROR", "ADMIN", f"Сбой при выполнении ручной рассылки: {e}")
+        try:
+            safe_api_call(bot.send_message, ADMIN_ID, f"❌ Ошибка при выполнении рассылки: {e}")
+        except Exception:
+            pass
+
+@bot.message_handler(commands=['admin_broadcast'])
+def trigger_manual_broadcast(message):
+    if message.chat.id != ADMIN_ID:
+        log("WARN", "SECURITY", f"Попытка доступа к ручной рассылке с неавторизованного ID: {message.chat.id}")
+        return 
+        
+    log("INFO", "ADMIN", f"Администратор {ADMIN_ID} запустил ручную рассылку вне расписания.")
+    safe_api_call(bot.send_message, ADMIN_ID, "⏳ Инициализирована ручная генерация и рассылка. Это займет некоторое время...")
+    
+    # Выполнение рассылки в отдельном потоке, чтобы бот продолжал отвечать на сообщения пользователей
+    thread = threading.Thread(target=safe_run_manual_broadcast, name="ManualBroadcast")
+    thread.daemon = True
+    thread.start()
+
 # --- Инициализация и запуск процесса ---
 if __name__ == "__main__":
-    import requests 
-    import signal  
-    
-    # Фоновый поток автоматической рассылки
+    # Фоновый поток автоматической рассылки по расписанию
     delivery_thread = threading.Thread(target=automated_delivery_loop, name="AutoSend")
     delivery_thread.daemon = True
     delivery_thread.start()
     
     try:
-        # При старте сразу ставим статус "В сети" в описание профиля (Bio) бота
+        # Установка статуса "В сети" в описание бота при старте
         requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/setMyShortDescription",
-            json={"short_description": "🟢 В сети. Нажмите /start, чтобы раствориться в бездне."}
+            json={"short_description": "🟢 В сети. Нажмите /start, чтобы раствориться в бездне."},
+            timeout=10
         )
         log("INFO", "SYSTEM", "Статус бота успешно переведен в режим 'Онлайн'.")
     except Exception as e:
@@ -1182,7 +1846,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=heartbeat_loop, name="Heartbeat", daemon=True)
     ping_thread.start()
     
-    log("INFO", "SYSTEM", "Бот успешно запущен на локальных ресурсах в космологическом режиме ожидания...")
+    log("INFO", "SYSTEM", "Бот успешно запущен в космологическом режиме ожидания...")
     
     try:
         bot.infinity_polling()
