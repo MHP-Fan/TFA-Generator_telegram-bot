@@ -1169,9 +1169,10 @@ def export_to_buffers_pil(processed_img, cmap=None, target_res=1600):
 
 
 # --- Оптимизированный генератор фракталов с лимитом времени 2 минуты ---
-def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None, force_cpu=False):
+def generate_fractal_pipeline(quality_res=1600, steps=10, progress_callback=None, force_cpu=False, timeout=120.0):
     start_time = time.time()
-    deadline = start_time + 120.0  # Жесткий лимит 120 секунд (2 минуты)
+    # Если timeout передан как None, лимит времени отключается
+    deadline = start_time + timeout if timeout else None
 
     rng = random.Random(secrets.randbits(128))
     seed_int = rng.randint(0, 2**128 - 1)
@@ -1282,62 +1283,114 @@ def run_broadcast_distribution():
     subs = load_subscribers()
     if not subs:
         log("INFO", "AUTO", "Подписчиков для рассылки нет.")
-        return
+        return {"status": "no_subscribers", "sent_count": 0}
         
     log("INFO", "AUTO", f"Инициация рассылки для {len(subs)} пользователей...")
     buf_jpeg, buf_png, formula, coords = None, None, None, None
-    for _ in range(15):  
+    
+    # ЭТАП 1: 15 попыток со строгим эстетическим фильтром и увеличенным таймаутом (300 секунд)
+    for attempt in range(1, 16):
         try:
-            buf_jpeg, buf_png, formula, coords = generate_fractal_pipeline(quality_res=1600, steps=10, force_cpu=True)
+            buf_jpeg, buf_png, formula, coords = generate_fractal_pipeline(
+                quality_res=1600, 
+                steps=10, 
+                force_cpu=False, 
+                timeout=300.0  # Увеличенный таймаут для фонового процесса
+            )
             if buf_jpeg is not None:
                 break
         except TimeoutError:
-            log("WARN", "AUTO", "Прервано по таймауту. Поиск новой сингулярности...")
+            log("WARN", "AUTO", f"Попытка рассылки {attempt} прервана по таймауту.")
             
-    if buf_jpeg is not None:
+    # ЭТАП 2: Резервный режим. Если строгий режим не справился, делаем 5 быстрых попыток 
+    # с пониженным разрешением и меньшим зумом (гарантированный рендер без таймаутов на CPU)
+    if buf_jpeg is None:
+        log("WARN", "AUTO", "Основная генерация не удалась. Запуск резервного режима с мягкими лимитами...")
+        for attempt in range(1, 6):
+            try:
+                buf_jpeg, buf_png, formula, coords = generate_fractal_pipeline(
+                    quality_res=1200,  # Облегченное разрешение для CPU
+                    steps=5,           # Меньше шагов зума — легче найти красивую точу
+                    force_cpu=False,
+                    timeout=180.0
+                )
+                if buf_jpeg is not None:
+                    break
+            except TimeoutError:
+                pass
+                
+    # ЭТАП 3: Если даже резервный режим дал сбой, рассылаем атмосферные уведомления о задержке
+    if buf_jpeg is None:
+        log("ERROR", "AUTO", "Критический сбой генерации рассылки. Отправка уведомлений о задержке...")
+        sent_notif = 0
         for chat_id in list(subs):
             try:
-                buf_jpeg.seek(0)
-                buf_png.seek(0)
-                
-                # Динамически получаем язык каждого конкретного подписчика
-                user_lang = get_user_setting(chat_id, "lang", None)
-                if not user_lang:
-                    user_lang = "en" # По умолчанию для рассылки, если язык не определен
-                    
-                t = TRANSLATIONS[user_lang]
-                
-                safe_send_photo(
-                    chat_id,
-                    buf_jpeg,
-                    caption=t["broadcast_caption"].format(
-                        formula=formula,
-                        xmin=coords['xmin'], xmax=coords['xmax'],
-                        ymin=coords['ymin'], ymax=coords['ymax']
-                    ),
-                    parse_mode='Markdown'
-                )
-                
-                buf_png.name = f"fractal_{secrets.token_hex(4)}.png"
-                safe_send_document(
-                    chat_id,
-                    buf_png,
-                    caption="🖼️ **PNG**" if user_lang == "en" else "🖼️ **PNG-оригинал без сжатия**",
-                    parse_mode='Markdown'
-                )
-                log("SUCCESS", "AUTO", f"Фрактал доставлен подписчику {chat_id} [Язык: {user_lang}].")
-            except telebot.apihelper.ApiTelegramException as e:
-                if e.error_code in [403, 400]:
-                    log("WARN", "AUTO", f"Пользователь {chat_id} заблокировал бота. Удаление подписки.")
-                    remove_subscriber(chat_id)
-                    stats.set_user_inactive(chat_id)
+                user_lang = get_user_setting(chat_id, "lang", None) or get_user_lang(chat_id)
+                if user_lang == "ru":
+                    notif_text = (
+                        "🌀 **Искажение информационного поля**\n\n"
+                        "Наши вычислительные ядра столкнулись с областью сверхвысокой плотности хаоса. "
+                        "Материализация планового фрактала временно задерживается. "
+                        "Математические процессоры уже пересчитывают сингулярность... Оставайтесь на связи! 🪐"
+                    )
+                else:
+                    notif_text = (
+                        "🌀 **Information Field Distortion**\n\n"
+                        "Our computing cores have encountered a region of ultra-high chaos density. "
+                        "The materialization of the scheduled fractal is temporarily delayed. "
+                        "Mathematical processors are already recalculating the singularity... Stay tuned! 🪐"
+                    )
+                safe_api_call(bot.send_message, chat_id, notif_text, parse_mode='Markdown')
+                sent_notif += 1
             except Exception as e:
-                log("ERROR", "AUTO", f"Ошибка отправки пользователю {chat_id}: {e}")
+                log("ERROR", "AUTO", f"Не удалось отправить уведомление о сбое пользователю {chat_id}: {e}")
+                
+        return {"status": "notified_delay", "sent_count": sent_notif}
+        
+    # ЭТАП 4: Если фрактал успешно получен, рассылаем его всем подписчикам
+    sent_success = 0
+    for chat_id in list(subs):
+        try:
+            buf_jpeg.seek(0)
+            buf_png.seek(0)
             
-            time.sleep(0.25)
+            user_lang = get_user_setting(chat_id, "lang", None) or get_user_lang(chat_id)
+            t = TRANSLATIONS[user_lang]
             
-        buf_jpeg.close()
-        buf_png.close()
+            safe_send_photo(
+                chat_id,
+                buf_jpeg,
+                caption=t["broadcast_caption"].format(
+                    formula=formula,
+                    xmin=coords['xmin'], xmax=coords['xmax'],
+                    ymin=coords['ymin'], ymax=coords['ymax']
+                ),
+                parse_mode='Markdown'
+            )
+            
+            buf_png.name = f"fractal_{secrets.token_hex(4)}.png"
+            safe_send_document(
+                chat_id,
+                buf_png,
+                caption="🖼️ **PNG**" if user_lang == "en" else "🖼️ **PNG-оригинал без сжатия**",
+                parse_mode='Markdown'
+            )
+            log("SUCCESS", "AUTO", f"Фрактал доставлен подписчику {chat_id} [Язык: {user_lang}].")
+            sent_success += 1
+        except telebot.apihelper.ApiTelegramException as e:
+            if e.error_code in [403, 400]:
+                log("WARN", "AUTO", f"Пользователь {chat_id} заблокировал бота. Удаление подписки.")
+                remove_subscriber(chat_id)
+                stats.set_user_inactive(chat_id)
+        except Exception as e:
+            log("ERROR", "AUTO", f"Ошибка отправки пользователю {chat_id}: {e}")
+            
+        time.sleep(0.25)
+        
+    buf_jpeg.close()
+    buf_png.close()
+    
+    return {"status": "success", "sent_count": sent_success}
 
 def automated_delivery_loop():
     INTERVAL = 7200 # 2 часа в секундах
@@ -2107,10 +2160,26 @@ def send_admin_report(message):
 
 # --- Обработчик ручного запуска рассылки ---
 def safe_run_manual_broadcast():
-    """Запускает рассылку в отдельном потоке с отловом исключений."""
+    """Запускает рассылку в отдельном потоке и отправляет админу отчет с учетом новой логики."""
     try:
-        run_broadcast_distribution()
-        safe_api_call(bot.send_message, ADMIN_ID, "✅ Ручная рассылка успешно завершена.")
+        report = run_broadcast_distribution()
+        
+        if report["status"] == "success":
+            msg = (
+                f"✅ **Ручная рассылка успешно завершена!**\n\n"
+                f"• Успешно отправлено подписчикам: `{report['sent_count']}`"
+            )
+        elif report["status"] == "notified_delay":
+            msg = (
+                f"⚠️ **Сбой генерации рассылки!**\n\n"
+                f"Не удалось построить фрактал ни в основном, ни в резервном режимах.\n"
+                f"• Подписчикам разослано научно-фантастическое уведомление о задержке.\n"
+                f"• Уведомления получили: `{report['sent_count']}` пользователей."
+            )
+        else:
+            msg = f"⚠️ **Рассылка завершена со статусом:** `{report['status']}`"
+            
+        safe_api_call(bot.send_message, ADMIN_ID, msg, parse_mode='Markdown')
     except Exception as e:
         log("ERROR", "ADMIN", f"Сбой при выполнении ручной рассылки: {e}")
         try:
