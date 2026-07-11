@@ -193,6 +193,215 @@ class StatsManager:
 
 stats = StatsManager()
 
+# --- СЛОВАРЬ ЛОКАЛИЗАЦИИ (РУССКИЙ / ENGLISH) ---
+# --- СЛОВАРЬ ЛОКАЛИЗАЦИИ (РУССКИЙ / ENGLISH) ---
+TRANSLATIONS = {
+    "ru": {
+        "welcome": (
+            "«Однажды погрузившись в фрактал, ты больше никогда не остановишься. "
+            "Позволь математике растворить тебя в бесконечности иррациональных чисел...»\n\n"
+            "👁‍⚙ **Синхронизация интерфейса завершена.** Используйте панель управления ниже.\n"
+            "Нажмите ❓ *Помощь*, чтобы узнать подробнее о всех функциях."
+        ),
+        "help": HELP_TEXT_RU,  # Здесь автоматически подставится русский текст справки
+        "btn_shallow": "🌌 Малые расстояния",
+        "btn_deep": "🌀 Сверхглубокий зум",
+        "btn_sub_start": "🧿 Запустить бесконечный поток",
+        "btn_sub_stop": "⏳ Остановить бесконечный поток",
+        "btn_batch3": "🔮 Сгенерировать пакет из 3 фракталов",
+        "btn_batch5": "🔮 Сгенерировать пакет из 5 фракталов",
+        "btn_custom": "✍️ Свой фрактал",
+        "btn_settings": "⚙️ Настройки",
+        "btn_help": "❓ Помощь",
+        "settings_title": "⚙️ **Настройки фрактальной генерации**",
+        "settings_desc": "Текущий режим пакетного рендеринга: **{mode}**\n└ _Этот режим определяет глубину зума при создании пакетов из 3 или 5 фракталов._",
+        "settings_lang": "🌍 Язык интерфейса: **Русский**",
+        "btn_toggle_zoom": "🔄 Переключить масштаб пакетов",
+        "btn_toggle_lang": "🌍 Change Language / Сменить язык",
+        "lang_changed": "Language changed to English!",
+        "busy": "⚠️ Вычисления уже запущены...",
+        "cooldown": "⏳ Подождите {val:.1f} сек...",
+        "status_shallow": "🌌 Малые расстояния на {steps} шагов...",
+        "status_deep": "🌀 Сверхглубокий масштаб на {steps} шагов...",
+        "attempt": "🧬 *Попытка {attempt}/{max_attempts}*",
+        "init_grid": "🧬 *Попытка {attempt}/{max_attempts}*\n└ Инициализация матрицы...",
+        "vectors": "🌀 Расчёт векторов комплексного поля...",
+        "zoom_position": "🪐 Позиционирование зума (Шаг {step}/{steps})...",
+        "check_aesthetic": "⚡ Проверка эстетического потенциала...",
+        "rendering_high": "🧬 Рендеринг фрактала высокой точности ({res}x{res})...",
+        "rejected_attempt": "⚠️ *Попытка {attempt}/{max_attempts}* отклонена.\n└ _Точка поля не рекомендована к визуализации. Ищем новую область..._",
+        "timeout_retry": "⚠️ *Попытка {attempt}/{max_attempts}* прервана по таймауту. Пересчет сингулярности...",
+        "unstable_chaos": "👁‍⚙ Математический хаос оказался слишком неустойчив. Повторите попытку.",
+        "fractal_ready": "🔮 **Погружение совершено.**\n\nХаос упорядочен формулой:\n`{formula}`\n\nКоординаты:\n`xmin = {xmin:.10f}`\n`xmax = {xmax:.10f}`\n`ymin = {ymin:.10f}`\n`ymax = {ymax:.10f}`\n\n{phrase}",
+        "png_caption": "🖼️ **Оригинальная проекция (PNG, без сжатия)**\n└ _Скачайте файл, чтобы рассмотреть микродетали без артефактов._",
+        "timeout_error": (
+            "⚠️ **Вычисления прерваны по таймауту (2 минуты).**\n\n"
+            "Генерируемое уравнение оказалось слишком ресурсоемким. "
+            "Сессия была перезапущена во избежание перегрузки сервера."
+        ),
+        "gen_error": "❌ Произошел сбой при генерации фрактала: {error}",
+        "sub_started": "👁‍⚙ **Поток запущен.**\n\nКаждые два часа математическое ядро будет автоматически проецировать новую случайную структуру высокой точности.",
+        "sub_stopped": "⏳ **Поток приостановлен.**\n\nБесконечность отпускает вас... до следующего ручного погружения.",
+        "batch_init": "🧬 Инициация пакетного рендеринга ({num} проекций).\nРежим масштабирования: **{mode}**.\nРасчёты проводятся последовательно.",
+        "batch_step": "🪐 *Фрактал {index} из {num}*\n└ Попытка {attempt}/{max_attempts}: {text}",
+        "batch_ready": "✨ **Фрактальный слой #{index}**\n\nУравнение эволюции:\n`{formula}`\n\nКоординаты:\n`xmin = {xmin:.8f}`\n`xmax = {xmax:.8f}`\n`ymin = {ymin:.8f}`\n`ymax = {ymax:.8f}`",
+        "batch_failed": "❌ Не удалось пробиться сквозь хаос. Проекции не построены.",
+        "batch_success": "🔮 **Пакетный перенос завершен.** Все проекции визуализированы.",
+        "broadcast_caption": (
+            "👁‍🗨 **Плановая материализация хаоса**\n\n"
+            "Высший математический порядок пробил бесконечность.\n"
+            "Проекция уравнения:\n`{formula}`\n\n"
+            "Координаты:\n"
+            "`xmin = {xmin:.10f}`\n"
+            "`xmax = {xmax:.10f}`\n"
+            "`ymin = {ymin:.10f}`\n"
+            "`ymax = {ymax:.10f}`\n\n"
+            "⏳ _Вы можете отключить поток в меню кнопкой в любой момент._"
+        ),
+        "custom_info": (
+            "✍️ **Генерация собственного фрактала по формуле**\n\n"
+            "Задайте формулу в алгебраическом формате и (опционально) координаты.\n\n"
+            "**Пример ввода:**\n"
+            "```\n"
+            "Формула: (Z^2) + C\n"
+            "Координаты: -2.0, 2.0, -2.0, 2.0\n"
+            "```\n"
+            "или просто формула (координаты определятся автозумом):\n"
+            "```\n"
+            "Формула: cos(Z) * C\n"
+            "```\n"
+            "**Переменные:** `Z`, `C` (комплексные числа)\n"
+            "**Функции:** `sin`, `cos`, `exp`, `ln`, `abs`, `conj`, `inv`, `sigmoid`\n"
+            "**Операторы:** `+`, `-`, `*`, `/`, `^` (степень)\n\n"
+            "Пришлите ваши параметры ответным сообщением (reply) на это сообщение."
+        ),
+        "custom_error": "❌ **Ошибка разбора формулы:**\n`{error}`\n\nПопробуйте еще раз. Пример корректной записи: `(Z^2) + C`",
+        "custom_success": (
+            "🎨 **Ваш кастомный фрактал готов!**\n\n"
+            "Формула:\n`{formula}`\n\n"
+            "Координаты:\n"
+            "`xmin = {xmin:.10f}`\n"
+            "`xmax = {xmax:.10f}`\n"
+            "`ymin = {ymin:.10f}`\n"
+            "`ymax = {ymax:.10f}`"
+        )
+    },
+    "en": {
+        "welcome": (
+            "“Once you dive into a fractal, you will never stop. "
+            "Let mathematics dissolve you into the infinity of irrational numbers...”\n\n"
+            "👁‍⚙ **Interface synchronization complete.** Use the control panel below.\n"
+            "Press ❓ *Help* to learn more about all the features."
+        ),
+        "help": HELP_TEXT_EN,  # Здесь автоматически подставится английский текст справки
+        "btn_shallow": "🌌 Shallow Zoom",
+        "btn_deep": "🌀 Deep Zoom",
+        "btn_sub_start": "🧿 Start Infinite Stream",
+        "btn_sub_stop": "⏳ Stop Infinite Stream",
+        "btn_batch3": "🔮 Generate Batch of 3",
+        "btn_batch5": "🔮 Generate Batch of 5",
+        "btn_custom": "✍️ Custom Fractal",
+        "btn_settings": "⚙️ Settings",
+        "btn_help": "❓ Help",
+        "settings_title": "⚙️ **Fractal Generation Settings**",
+        "settings_desc": "Current batch rendering mode: **{mode}**\n└ _This mode determines the zoom depth when creating batches of 3 or 5 fractals._",
+        "settings_lang": "🌍 Interface Language: **English**",
+        "btn_toggle_zoom": "🔄 Toggle Batch Scale",
+        "btn_toggle_lang": "🌍 Change Language / Сменить язык",
+        "lang_changed": "Язык изменен на Русский!",
+        "busy": "⚠️ Computation is already running...",
+        "cooldown": "⏳ Please wait {val:.1f} sec...",
+        "status_shallow": "🌌 Shallow zoom for {steps} steps...",
+        "status_deep": "🌀 Deep zoom for {steps} steps...",
+        "attempt": "🧬 *Attempt {attempt}/{max_attempts}*",
+        "init_grid": "🧬 *Attempt {attempt}/{max_attempts}*\n└ Initializing grid...",
+        "vectors": "🌀 Computing complex field vectors...",
+        "zoom_position": "🪐 Positioning zoom (Step {step}/{steps})...",
+        "check_aesthetic": "⚡ Evaluation of aesthetic potential...",
+        "rendering_high": "🧬 Rendering high-precision fractal ({res}x{res})...",
+        "rejected_attempt": "⚠️ *Attempt {attempt}/{max_attempts}* rejected.\n└ _The region is not recommended for visualization. Searching for a new area..._",
+        "timeout_retry": "⚠️ *Attempt {attempt}/{max_attempts}* timed out. Recalculating singularity...",
+        "unstable_chaos": "👁‍⚙ Mathematical chaos proved too unstable. Please try again.",
+        "fractal_ready": "🔮 **Dive completed.**\n\nChaos is ordered by formula:\n`{formula}`\n\nCoordinates:\n`xmin = {xmin:.10f}`\n`xmax = {xmax:.10f}`\n`ymin = {ymin:.10f}`\n`ymax = {ymax:.10f}`\n\n{phrase}",
+        "png_caption": "🖼️ **Original projection (PNG, uncompressed)**\n└ _Download this file to see microscopic details without compression artifacts._",
+        "timeout_error": (
+            "⚠️ **Computation timed out (2 minutes).**\n\n"
+            "The generated equation was too resource-intensive. "
+            "The session was restarted to prevent server overload."
+        ),
+        "gen_error": "❌ Generation failed: {error}",
+        "sub_started": "👁‍⚙ **Stream started.**\n\nEvery two hours, the mathematical core will automatically project a new high-precision structure to you.",
+        "sub_stopped": "⏳ **Stream paused.**\n\nInfinity lets you go... until your next manual dive.",
+        "batch_init": "🧬 Initiating batch rendering ({num} projections).\nZoom mode: **{mode}**.\nCalculations are performed sequentially.",
+        "batch_step": "🪐 *Fractal {index} of {num}*\n└ Attempt {attempt}/{max_attempts}: {text}",
+        "batch_ready": "✨ **Fractal Layer #{index}**\n\nEvolution equation:\n`{formula}`\n\nCoordinates:\n`xmin = {xmin:.8f}`\n`xmax = {xmax:.8f}`\n`ymin = {ymin:.8f}`\n`ymax = {ymax:.8f}`",
+        "batch_failed": "❌ Failed to break through chaos. Projections were not rendered.",
+        "batch_success": "🔮 **Batch transfer complete.** All projections rendered successfully.",
+        "broadcast_caption": (
+            "👁‍🗨 **Scheduled Materialization of Chaos**\n\n"
+            "Higher mathematical order has pierced infinity.\n"
+            "Equation projection:\n`{formula}`\n\n"
+            "Coordinates:\n"
+            "`xmin = {xmin:.10f}`\n"
+            "`xmax = {xmax:.10f}`\n"
+            "`ymin = {ymin:.10f}`\n"
+            "`ymax = {ymax:.10f}`\n\n"
+            "⏳ _You can stop the stream at any time using the button in the settings menu._"
+        ),
+        "custom_info": (
+            "✍️ **Generate Your Own Fractal by Formula**\n\n"
+            "Define the formula in algebraic format and (optionally) coordinates.\n\n"
+            "**Input Example:**\n"
+            "```\n"
+            "Formula: (Z^2) + C\n"
+            "Coordinates: -2.0, 2.0, -2.0, 2.0\n"
+            "```\n"
+            "or just the formula (coordinates will be auto-focused):\n"
+            "```\n"
+            "Formula: cos(Z) * C\n"
+            "```\n"
+            "**Variables:** `Z`, `C` (complex numbers)\n"
+            "**Functions:** `sin`, `cos`, `exp`, `ln`, `abs`, `conj`, `inv`, `sigmoid`\n"
+            "**Operators:** `+`, `-`, `*`, `/`, `^` (power)\n\n"
+            "Send your parameters in a reply to this message."
+        ),
+        "custom_error": "❌ **Formula parsing error:**\n`{error}`\n\nTry again. Example of valid entry: `(Z^2) + C`",
+        "custom_success": (
+            "🎨 **Your custom fractal is ready!**\n\n"
+            "Formula:\n`{formula}`\n\n"
+            "Coordinates:\n"
+            "`xmin = {xmin:.10f}`\n"
+            "`xmax = {xmax:.10f}`\n"
+            "`ymin = {ymin:.10f}`\n"
+            "`ymax = {ymax:.10f}`"
+        )
+    }
+}
+
+# Английские фразы-комментарии (в дополнение к bot_phrases)
+DEFAULT_PHRASES_EN = [
+    "The aesthetics of fractal composition in its pure mathematical form.",
+    "The balance of symmetry and asymmetry born of a formula.",
+    "Geometry as a way to order visual chaos.",
+    "Exploring the plastics and rhythm of complex space."
+]
+
+def get_user_lang(message_or_chat_id):
+    """Определяет язык пользователя: сохраненный в JSON или по коду языка Telegram."""
+    if isinstance(message_or_chat_id, (int, str)):
+        chat_id = message_or_chat_id
+        lang_code = "en"
+    else:
+        chat_id = message_or_chat_id.chat.id
+        lang_code = message_or_chat_id.from_user.language_code if message_or_chat_id.from_user else "en"
+        
+    saved_lang = get_user_setting(chat_id, "lang", None)
+    if saved_lang:
+        return saved_lang
+        
+    if lang_code and lang_code.lower().startswith("ru"):
+        return "ru"
+    return "en"
 
 # --- Сетевой слой с защитой от SSLEOFError и разрывов соединений ---
 def safe_api_call(func, *args, **kwargs):
@@ -1091,19 +1300,20 @@ def run_broadcast_distribution():
                 buf_jpeg.seek(0)
                 buf_png.seek(0)
                 
+                # Динамически получаем язык каждого конкретного подписчика
+                user_lang = get_user_setting(chat_id, "lang", None)
+                if not user_lang:
+                    user_lang = "en" # По умолчанию для рассылки, если язык не определен
+                    
+                t = TRANSLATIONS[user_lang]
+                
                 safe_send_photo(
                     chat_id,
                     buf_jpeg,
-                    caption=(
-                        "👁‍🗨 **Плановая материализация хаоса**\n\n"
-                        "Высший математический порядок пробил бесконечность.\n"
-                        f"Проекция уравнения:\n`{formula}`\n\n"
-                        f"Координаты:\n"
-                        f"`xmin = {coords['xmin']:.10f}`\n"
-                        f"`xmax = {coords['xmax']:.10f}`\n"
-                        f"`ymin = {coords['ymin']:.10f}`\n"
-                        f"`ymax = {coords['ymax']:.10f}`\n\n"
-                        "⏳ _Вы можете отключить поток в меню кнопкой в любой момент._"
+                    caption=t["broadcast_caption"].format(
+                        formula=formula,
+                        xmin=coords['xmin'], xmax=coords['xmax'],
+                        ymin=coords['ymin'], ymax=coords['ymax']
                     ),
                     parse_mode='Markdown'
                 )
@@ -1112,10 +1322,10 @@ def run_broadcast_distribution():
                 safe_send_document(
                     chat_id,
                     buf_png,
-                    caption="🖼️ **PNG-оригинал без сжатия**",
+                    caption="🖼️ **PNG**" if user_lang == "en" else "🖼️ **PNG-оригинал без сжатия**",
                     parse_mode='Markdown'
                 )
-                log("SUCCESS", "AUTO", f"Фрактал доставлен подписчику {chat_id}.")
+                log("SUCCESS", "AUTO", f"Фрактал доставлен подписчику {chat_id} [Язык: {user_lang}].")
             except telebot.apihelper.ApiTelegramException as e:
                 if e.error_code in [403, 400]:
                     log("WARN", "AUTO", f"Пользователь {chat_id} заблокировал бота. Удаление подписки.")
@@ -1124,7 +1334,6 @@ def run_broadcast_distribution():
             except Exception as e:
                 log("ERROR", "AUTO", f"Ошибка отправки пользователю {chat_id}: {e}")
             
-            # Троттлинг отправки: распределяем отправку во времени для предотвращения блокировок
             time.sleep(0.25)
             
         buf_jpeg.close()
@@ -1164,22 +1373,24 @@ def automated_delivery_loop():
 
 
 # --- Динамический интерфейс ---
-def get_main_keyboard(chat_id):
+def get_main_keyboard(chat_id, lang="ru"):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    btn_gen = types.KeyboardButton("🌌 Малые расстояния")
-    btn_lucky = types.KeyboardButton("🌀 Сверхглубокий зум")
+    
+    t = TRANSLATIONS[lang]
+    btn_gen = types.KeyboardButton(t["btn_shallow"])
+    btn_lucky = types.KeyboardButton(t["btn_deep"])
     
     subs = load_subscribers()
     if chat_id in subs:
-        btn_sub = types.KeyboardButton("⏳ Остановить бесконечный поток")
+        btn_sub = types.KeyboardButton(t["btn_sub_stop"])
     else:
-        btn_sub = types.KeyboardButton("🧿 Запустить бесконечный поток")
+        btn_sub = types.KeyboardButton(t["btn_sub_start"])
         
-    btn_batch3 = types.KeyboardButton("🔮 Сгенерировать пакет из 3 фракталов")
-    btn_batch5 = types.KeyboardButton("🔮 Сгенерировать пакет из 5 фракталов")
-    btn_custom = types.KeyboardButton("✍️ Свой фрактал")
-    btn_settings = types.KeyboardButton("⚙️ Настройки")
-    btn_help = types.KeyboardButton("❓ Помощь")
+    btn_batch3 = types.KeyboardButton(t["btn_batch3"])
+    btn_batch5 = types.KeyboardButton(t["btn_batch5"])
+    btn_custom = types.KeyboardButton(t["btn_custom"])
+    btn_settings = types.KeyboardButton(t["btn_settings"])
+    btn_help = types.KeyboardButton(t["btn_help"])
     
     markup.row(btn_gen, btn_lucky)
     markup.row(btn_batch3, btn_batch5)
@@ -1188,7 +1399,7 @@ def get_main_keyboard(chat_id):
     markup.row(btn_help)
     return markup
 
-HELP_TEXT = (
+HELP_TEXT_RU = (
     "👁‍⚙ **Фрактальный навигатор — справка**\n\n"
     "Бот генерирует уникальные процедурные фракталы на основе математических формул. "
     "Каждое изображение создаётся с нуля и проходит многоступенчатые эстетические тесты.\n\n"
@@ -1211,6 +1422,52 @@ HELP_TEXT = (
     "Приятных погружений! 🌀"
 )
 
+HELP_TEXT_EN = (
+    "👁‍⚙ **Fractal Navigator — Help**\n\n"
+    "The bot generates unique procedural fractals using mathematical formulas. "
+    "Each image is rendered from scratch and passes multi-stage aesthetic evaluations.\n\n"
+    "🎛 **Control Keys:**\n\n"
+    "🌌 *Shallow Zoom* – standard dive with random zoom (4 to 10 steps). "
+    "Allows observing the general shape and harmony of the fractal.\n\n"
+    "🌀 *Deep Zoom* – deep dive (15 to 30 steps). "
+    "Explores microscopic details deep inside the chaos. Requires more resources.\n\n"
+    "🧿 *Start Infinite Stream* – the bot will automatically send you a new fractal every 2 hours.\n"
+    "⏳ *Stop Infinite Stream* – disables automated delivery.\n\n"
+    "🔮 *Batch of 3 / 5* – sequential generation of several fractals "
+    "(zoom depth can be configured in settings).\n\n"
+    "✍️ *Custom Fractal* – allows you to enter your own formula and coordinate range for exact rendering.\n\n"
+    "⚙️ *Settings* – scaling parameters for batch rendering and language settings.\n\n"
+    "❓ *Help* – shows this message.\n\n"
+    "⚙️ **Technical Details:**\n"
+    "• Each projection outputs precise coordinates and formula so you can replicate it later!\n"
+    "• One computation is limited to 120 seconds.\n"
+    "• There is a 4-second cooldown between manually requested generations.\n\n"
+    "Enjoy the dive! 🌀"
+)
+
+HELP_TEXT_EN = (
+    "👁‍⚙ **Fractal Navigator — Help**\n\n"
+    "The bot generates unique procedural fractals using mathematical formulas. "
+    "Each image is rendered from scratch and passes multi-stage aesthetic evaluations.\n\n"
+    "🎛 **Control Keys:**\n\n"
+    "🌌 *Shallow Zoom* – standard dive with random zoom (4 to 10 steps). "
+    "Allows observing the general shape and harmony of the fractal.\n\n"
+    "🌀 *Deep Zoom* – deep dive (15 to 30 steps). "
+    "Explores microscopic details deep inside the chaos. Requires more resources.\n\n"
+    "🧿 *Start Infinite Stream* – the bot will automatically send you a new fractal every 2 hours.\n"
+    "⏳ *Stop Infinite Stream* – disables automated delivery.\n\n"
+    "🔮 *Batch of 3 / 5* – sequential generation of several fractals "
+    "(zoom depth can be configured in settings).\n\n"
+    "✍️ *Custom Fractal* – allows you to enter your own formula and coordinate range for exact rendering.\n\n"
+    "⚙️ *Settings* – scaling parameters for batch rendering and language settings.\n\n"
+    "❓ *Help* – shows this message.\n\n"
+    "⚙️ **Technical Details:**\n"
+    "• Each projection outputs precise coordinates and formula so you can replicate it later!\n"
+    "• One computation is limited to 120 seconds.\n"
+    "• There is a 4-second cooldown between manually requested generations.\n\n"
+    "Enjoy the dive! 🌀"
+)
+
 # --- Система отправки пингов на облако (Наблюдатель) ---
 def heartbeat_loop():
     while True:
@@ -1225,123 +1482,153 @@ def heartbeat_loop():
 @bot.message_handler(commands=['start', 'help', 'restart'])
 def send_welcome(message):
     try:
-        stats.register_user(message.chat.id)
+        chat_id = message.chat.id
+        stats.register_user(chat_id)
+        lang = get_user_lang(message)
+        
         safe_api_call(
             bot.send_message,
-            message.chat.id, 
-            "«Однажды погрузившись в фрактал, ты больше никогда не остановишься. "
-            "Позволь математике растворить тебя в бесконечности иррациональных чисел...»\n\n"
-            "👁‍⚙ **Синхронизация интерфейса завершена.** Используйте панель управления ниже.\n"
-            "Нажмите ❓ *Помощь*, чтобы узнать подробнее о всех функциях.",
-            reply_markup=get_main_keyboard(message.chat.id),
+            chat_id, 
+            TRANSLATIONS[lang]["welcome"],
+            reply_markup=get_main_keyboard(chat_id, lang),
             parse_mode='Markdown'
         )
     except Exception as e:
         log("ERROR", "TELEGRAM", f"Ошибка отправки приветствия: {e}")
 
-@bot.message_handler(commands=['help'])
-@bot.message_handler(func=lambda message: message.text == "❓ Помощь")
+@bot.message_handler(func=lambda message: message.text in ["❓ Помощь", "❓ Help"])
 def send_help(message):
     try:
-        stats.register_user(message.chat.id)
+        chat_id = message.chat.id
+        stats.register_user(chat_id)
+        lang = get_user_lang(message)
+        
         safe_api_call(
             bot.send_message,
-            message.chat.id,
-            HELP_TEXT,
-            reply_markup=get_main_keyboard(message.chat.id),
+            chat_id,
+            TRANSLATIONS[lang]["help"],
+            reply_markup=get_main_keyboard(chat_id, lang),
             parse_mode='Markdown'
         )
     except Exception as e:
         log("ERROR", "TELEGRAM", f"Ошибка отправки справки: {e}")
 
-@bot.message_handler(func=lambda message: message.text == "⚙️ Настройки")
+@bot.message_handler(func=lambda message: message.text in ["⚙️ Настройки", "⚙️ Settings"])
 def show_settings(message):
     chat_id = message.chat.id
     stats.register_user(chat_id)
+    lang = get_user_lang(message)
+    t = TRANSLATIONS[lang]
+    
     mode = get_user_setting(chat_id, "zoom_mode", "shallow")
-    mode_text = "🌌 Малые расстояния" if mode == "shallow" else "🌀 Сверхглубокий зум"
+    if lang == "ru":
+        mode_text = "🌌 Малые расстояния" if mode == "shallow" else "🌀 Сверхглубокий зум"
+    else:
+        mode_text = "🌌 Shallow Zoom" if mode == "shallow" else "🌀 Deep Zoom"
     
     markup = types.InlineKeyboardMarkup()
-    btn_toggle = types.InlineKeyboardButton("🔄 Переключить масштаб пакетов", callback_data="toggle_zoom_mode")
+    btn_toggle = types.InlineKeyboardButton(t["btn_toggle_zoom"], callback_data="toggle_zoom_mode")
+    btn_lang = types.InlineKeyboardButton(t["btn_toggle_lang"], callback_data="toggle_lang")
     markup.add(btn_toggle)
+    markup.add(btn_lang)
     
     safe_api_call(
         bot.send_message,
         chat_id,
-        f"⚙️ **Настройки фрактальной генерации**\n\n"
-        f"Текущий режим пакетного рендеринга: **{mode_text}**\n"
-        f"└ _Этот режим определяет глубину зума при создании пакетов из 3 или 5 фракталов._",
+        f"{t['settings_title']}\n\n"
+        f"{t['settings_desc'].format(mode=mode_text)}\n\n"
+        f"{t['settings_lang']}",
         reply_markup=markup,
         parse_mode='Markdown'
     )
 
-@bot.callback_query_handler(func=lambda call: call.data == "toggle_zoom_mode")
-def callback_toggle_zoom_mode(call):
+@bot.callback_query_handler(func=lambda call: call.data in ["toggle_zoom_mode", "toggle_lang"])
+def callback_settings(call):
     chat_id = call.message.chat.id
-    current_mode = get_user_setting(chat_id, "zoom_mode", "shallow")
-    new_mode = "deep" if current_mode == "shallow" else "shallow"
-    save_user_setting(chat_id, "zoom_mode", new_mode)
+    lang = get_user_lang(call.message)
     
-    mode_text = "🌌 Малые расстояния" if new_mode == "shallow" else "🌀 Сверхглубокий зум"
-    
+    if call.data == "toggle_zoom_mode":
+        current_mode = get_user_setting(chat_id, "zoom_mode", "shallow")
+        new_mode = "deep" if current_mode == "shallow" else "shallow"
+        save_user_setting(chat_id, "zoom_mode", new_mode)
+        
+    elif call.data == "toggle_lang":
+        new_lang = "en" if lang == "ru" else "ru"
+        save_user_setting(chat_id, "lang", new_lang)
+        lang = new_lang  # Обновляем локальную переменную для вывода нового текста
+        
+    t = TRANSLATIONS[lang]
+    mode = get_user_setting(chat_id, "zoom_mode", "shallow")
+    if lang == "ru":
+        mode_text = "🌌 Малые расстояния" if mode == "shallow" else "🌀 Сверхглубокий зум"
+    else:
+        mode_text = "🌌 Shallow Zoom" if mode == "shallow" else "🌀 Deep Zoom"
+        
     markup = types.InlineKeyboardMarkup()
-    btn_toggle = types.InlineKeyboardButton("🔄 Переключить масштаб пакетов", callback_data="toggle_zoom_mode")
+    btn_toggle = types.InlineKeyboardButton(t["btn_toggle_zoom"], callback_data="toggle_zoom_mode")
+    btn_lang = types.InlineKeyboardButton(t["btn_toggle_lang"], callback_data="toggle_lang")
     markup.add(btn_toggle)
+    markup.add(btn_lang)
     
     try:
         safe_edit_message_text(
-            f"⚙️ **Настройки фрактальной генерации**\n\n"
-            f"Текущий режим пакетного рендеринга: **{mode_text}**\n"
-            f"└ _Этот режим определяет глубину зума при создании пакетов из 3 или 5 фракталов._",
+            f"{t['settings_title']}\n\n"
+            f"{t['settings_desc'].format(mode=mode_text)}\n\n"
+            f"{t['settings_lang']}",
             chat_id,
             call.message.message_id,
             reply_markup=markup,
             parse_mode='Markdown'
         )
-        bot.answer_callback_query(call.id, f"Режим изменен на {mode_text}!")
+        # Также обновляем Reply-кнопки меню на лету под новый язык!
+        safe_api_call(
+            bot.send_message,
+            chat_id,
+            t["lang_changed"] if call.data == "toggle_lang" else "✅",
+            reply_markup=get_main_keyboard(chat_id, lang)
+        )
+        bot.answer_callback_query(call.id)
     except Exception:
         pass
 
-@bot.message_handler(func=lambda message: message.text == "✍️ Свой фрактал")
+@bot.message_handler(func=lambda message: message.text in ["✍️ Свой фрактал", "✍️ Custom Fractal"])
 def request_custom_fractal(message):
     chat_id = message.chat.id
     stats.register_user(chat_id)
+    lang = get_user_lang(message)
+    t = TRANSLATIONS[lang]
+    
     safe_api_call(
         bot.send_message,
         chat_id,
-        "✍️ **Генерация собственного фрактала по формуле**\n\n"
-        "Задайте формулу в алгебраическом формате и (опционально) координаты.\n\n"
-        "**Пример ввода:**\n"
-        "```\n"
-        "Формула: (Z^2) + C\n"
-        "Координаты: -2.0, 2.0, -2.0, 2.0\n"
-        "```\n"
-        "или просто формула (координаты определятся автозумом):\n"
-        "```\n"
-        "Формула: cos(Z) * C\n"
-        "```\n"
-        "**Переменные:** `Z`, `C` (комплексные числа)\n"
-        "**Функции:** `sin`, `cos`, `exp`, `ln`, `abs`, `conj`, `inv`, `sigmoid`\n"
-        "**Операторы:** `+`, `-`, `*`, `/`, `^` (степень)\n\n"
-        "Пришлите ваши параметры ответным сообщением (reply) на это сообщение.",
+        t["custom_info"],
         parse_mode='Markdown',
         reply_markup=types.ForceReply(selective=True)
     )
 
-@bot.message_handler(func=lambda msg: msg.reply_to_message and "Пришлите ваши параметры ответным сообщением" in msg.reply_to_message.text)
+@bot.message_handler(func=lambda msg: msg.reply_to_message and (
+    "Пришлите ваши параметры ответным сообщением" in msg.reply_to_message.text or
+    "Send your parameters in a reply" in msg.reply_to_message.text
+))
 def handle_custom_fractal_input(message):
     chat_id = message.chat.id
     text = message.text
+    lang = get_user_lang(message)
+    t = TRANSLATIONS[lang]
     
     formula_str = None
     coords_tuple = None
     
+    # Парсинг полей независимо от языка
     lines = text.split("\n")
     for line in lines:
-        if "Формула:" in line:
-            formula_str = line.split("Формула:")[1].strip()
-        elif "Координаты:" in line:
-            coords_str = line.split("Координаты:")[1].strip()
+        if "Формула:" in line or "Formula:" in line:
+            # Поддержка обоих вариантов написания
+            parts = line.split("Формула:") if "Формула:" in line else line.split("Formula:")
+            formula_str = parts[1].strip()
+        elif "Координаты:" in line or "Coordinates:" in line:
+            parts = line.split("Координаты:") if "Координаты:" in line else line.split("Coordinates:")
+            coords_str = parts[1].strip()
             try:
                 coords_tuple = tuple(map(float, coords_str.replace(" ", "").split(",")))
             except Exception:
@@ -1361,22 +1648,21 @@ def handle_custom_fractal_input(message):
         safe_api_call(
             bot.send_message,
             chat_id,
-            f"❌ **Ошибка разбора формулы:**\n`{str(e)}`\n\n"
-            f"Попробуйте еще раз. Пример корректной записи: `(Z^2) + C`",
+            t["custom_error"].format(error=str(e)),
             parse_mode='Markdown'
         )
         return
         
     status, val = user_manager.try_start_job(chat_id)
     if status == "busy":
-        safe_api_call(bot.send_message, chat_id, "⚠️ Вычисления уже запущены...")
+        safe_api_call(bot.send_message, chat_id, t["busy"])
         return
     elif status == "cooldown":
-        safe_api_call(bot.send_message, chat_id, f"⏳ Подождите {val:.1f} сек...")
+        safe_api_call(bot.send_message, chat_id, t["cooldown"].format(val=val))
         return
         
     try:
-        status_msg = safe_api_call(bot.send_message, chat_id, "🧬 Математическое ядро обрабатывает вашу формулу...")
+        status_msg = safe_api_call(bot.send_message, chat_id, "🧬 ...")
         updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
         
         if coords_tuple:
@@ -1391,7 +1677,7 @@ def handle_custom_fractal_input(message):
         
         if steps > 0:
             rng = random.Random(secrets.randbits(128))
-            updater.update("🧬 Поиск эстетически выразительной области...")
+            updater.update(f"🧬 {t['zoom_position'].format(step=1, steps=steps)}")
             for step in range(1, steps + 1):
                 current_max_iter = 120 + step * 60
                 img, x, y = safe_compute_grid(
@@ -1407,7 +1693,7 @@ def handle_custom_fractal_input(message):
         ssaa_factor = 1.5 if (HAS_TORCH and DEVICE.type == 'cuda') else 1.0
         render_res = int(target_res * ssaa_factor)
         
-        updater.update(f"🪐 Финальный рендеринг высокой точности ({target_res}x{target_res})...")
+        updater.update(t["rendering_high"].format(res=target_res))
         
         final_img, _, _ = safe_compute_grid(
             xmin, xmax, ymin, ymax, render_res, render_res, final_max_iter, rpn_tokens, is_julia, c_val, use_double=True
@@ -1427,24 +1713,20 @@ def handle_custom_fractal_input(message):
         safe_send_photo(
             chat_id, 
             buf_jpeg, 
-            caption=(
-                f"🎨 **Ваш кастомный фрактал готов!**\n\n"
-                f"Формула:\n`{formula_str}`\n\n"
-                f"Координаты:\n"
-                f"`xmin = {xmin:.10f}`\n"
-                f"`xmax = {xmax:.10f}`\n"
-                f"`ymin = {ymin:.10f}`\n"
-                f"`ymax = {ymax:.10f}`"
+            caption=t["custom_success"].format(
+                formula=formula_str,
+                xmin=xmin, xmax=xmax,
+                ymin=ymin, ymax=ymax
             ), 
             parse_mode='Markdown',
-            reply_markup=get_main_keyboard(chat_id)
+            reply_markup=get_main_keyboard(chat_id, lang)
         )
         
         buf_png.name = f"custom_fractal_{secrets.token_hex(4)}.png"
         safe_send_document(
             chat_id,
             buf_png,
-            caption="🖼️ **PNG-оригинал без сжатия (для детального зума)**",
+            caption=t["png_caption"],
             parse_mode='Markdown'
         )
         
@@ -1455,40 +1737,41 @@ def handle_custom_fractal_input(message):
         
     except Exception as e:
         log("ERROR", "CUSTOM_RENDER", f"Ошибка при кастомном рендере: {e}")
-        safe_api_call(bot.send_message, chat_id, f"❌ Ошибка генерации: {str(e)}", reply_markup=get_main_keyboard(chat_id))
+        safe_api_call(bot.send_message, chat_id, t["gen_error"].format(error=str(e)), reply_markup=get_main_keyboard(chat_id, lang))
     finally:
         user_manager.end_job(chat_id)
 
-@bot.message_handler(func=lambda message: message.text == "🌌 Малые расстояния")
-@bot.message_handler(func=lambda message: message.text == "🌀 Сверхглубокий зум")
+@bot.message_handler(func=lambda message: message.text in ["🌌 Малые расстояния", "🌌 Shallow Zoom"])
+@bot.message_handler(func=lambda message: message.text in ["🌀 Сверхглубокий зум", "🌀 Deep Zoom"])
 @bot.message_handler(commands=['generate'])
 def send_fractal(message):
     chat_id = message.chat.id
     username = message.from_user.username or "NoUsername"
-    
-    # Непосредственное логирование факта нажатия кнопки пользователем
-    log("INFO", "TELEGRAM", f"Пользователь {chat_id} (@{username}) запросил генерацию: '{message.text}'")
+    lang = get_user_lang(message)
+    t = TRANSLATIONS[lang]
 
-    if "Сверхглубокий" in message.text:
+    log("INFO", "TELEGRAM", f"Пользователь {chat_id} (@{username}) запросил генерацию: '{message.text}' [Язык: {lang}]")
+
+    if "Сверхглубокий" in message.text or "Deep" in message.text:
         steps_min, steps_max = 15, 30
-        mode_text = "🌀 Сверхглубокий масштаб"
+        mode_text = t["status_deep"]
         gen_type = "deep"
     else:
         steps_min, steps_max = 4, 10
-        mode_text = "🌌 Малые расстояния"
+        mode_text = t["status_shallow"]
         gen_type = "shallow"
 
     status, val = user_manager.try_start_job(chat_id)
     if status == "busy":
-        safe_api_call(bot.send_message, chat_id, "⚠️ Вычисления уже запущены...")
+        safe_api_call(bot.send_message, chat_id, t["busy"])
         return
     elif status == "cooldown":
-        safe_api_call(bot.send_message, chat_id, f"⏳ Подождите {val:.1f} сек...")
+        safe_api_call(bot.send_message, chat_id, t["cooldown"].format(val=val))
         return
 
     try:
         random_steps = random.randint(steps_min, steps_max)
-        status_msg = safe_api_call(bot.send_message, chat_id, f"{mode_text} на {random_steps} шагов...")
+        status_msg = safe_api_call(bot.send_message, chat_id, mode_text.format(steps=random_steps))
         updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
         
         buf_jpeg, buf_png, formula, coords = None, None, None, None
@@ -1496,36 +1779,40 @@ def send_fractal(message):
         
         for attempt in range(1, max_attempts + 1):
             def make_callback(att):
-                return lambda text: updater.update(f"🧬 *Попытка {att}/{max_attempts}*\n└ {text}")
+                return lambda text: updater.update(f"{t['attempt'].format(attempt=att, max_attempts=max_attempts)}\n└ {text}")
             
-            updater.update(f"🧬 *Попытка {attempt}/{max_attempts}*\n└ Инициализация матрицы...", force=True)
+            updater.update(t["init_grid"].format(attempt=attempt, max_attempts=max_attempts), force=True)
             
             try:
+                # Передаем переводы прогресса внутрь пайплайна через замену коллбэков (для простоты оставляем общие вызовы, локализуя текст)
+                localized_cb = lambda step_txt: make_callback(attempt)(
+                    t["vectors"] if "векторов" in step_txt else
+                    t["zoom_position"].format(step=re.findall(r'\d+', step_txt)[0], steps=random_steps) if "Позиционирование" in step_txt else
+                    t["check_aesthetic"] if "эстетического" in step_txt else
+                    t["rendering_high"].format(res=1600 if (HAS_TORCH and DEVICE.type == 'cuda') else 1200) if "Рендеринг" in step_txt else step_txt
+                )
+                
                 buf_jpeg, buf_png, formula, coords = generate_fractal_pipeline(
                     quality_res=1600, 
                     steps=random_steps, 
-                    progress_callback=make_callback(attempt)
+                    progress_callback=localized_cb
                 )
             except TimeoutError as te:
                 log("ERROR", "TIMEOUT", f"Таймаут вычислений на попытке {attempt}: {te}")
                 if attempt == max_attempts:
                     raise te
-                updater.update(f"⚠️ *Попытка {attempt}/{max_attempts}* прервана по таймауту. Пересчет сингулярности...", force=True)
+                updater.update(t["timeout_retry"].format(attempt=attempt, max_attempts=max_attempts), force=True)
                 time.sleep(1.0)
                 continue
             
             if buf_jpeg is not None:
                 break
             else:
-                updater.update(
-                    f"⚠️ *Попытка {attempt}/{max_attempts}* отклонена.\n"
-                    f"└ _Точка поля не рекомендована к визуализации. Ищем новую область..._",
-                    force=True
-                )
+                updater.update(t["rejected_attempt"].format(attempt=attempt, max_attempts=max_attempts), force=True)
                 time.sleep(1.0)
         
         if buf_jpeg is None:
-            updater.update("👁‍⚙ Математический хаос оказался слишком неустойчив. Повторите попытку.", force=True)
+            updater.update(t["unstable_chaos"], force=True)
             return
             
         try:
@@ -1534,21 +1821,20 @@ def send_fractal(message):
             pass
         
         log("UPLOAD", "TELEGRAM", f"Отправка превью-фото {chat_id}...")
+        
+        phrase = random.choice(DEFAULT_PHRASES_EN) if lang == "en" else get_random_phrase()
+        
         safe_send_photo(
             chat_id, 
             buf_jpeg, 
-            caption=(
-                f"🔮 **Погружение совершено.**\n\n"
-                f"Хаос упорядочен формулой:\n`{formula}`\n\n"
-                f"Координаты:\n"
-                f"`xmin = {coords['xmin']:.10f}`\n"
-                f"`xmax = {coords['xmax']:.10f}`\n"
-                f"`ymin = {coords['ymin']:.10f}`\n"
-                f"`ymax = {coords['ymax']:.10f}`\n\n"
-                f"{get_random_phrase()}"
+            caption=t["fractal_ready"].format(
+                formula=formula,
+                xmin=coords['xmin'], xmax=coords['xmax'],
+                ymin=coords['ymin'], ymax=coords['ymax'],
+                phrase=phrase
             ), 
             parse_mode='Markdown',
-            reply_markup=get_main_keyboard(chat_id)
+            reply_markup=get_main_keyboard(chat_id, lang)
         )
         
         log("UPLOAD", "TELEGRAM", f"Отправка оригинального PNG-файла {chat_id}...")
@@ -1556,13 +1842,12 @@ def send_fractal(message):
         safe_send_document(
             chat_id,
             buf_png,
-            caption="🖼️ **Оригинальная проекция (PNG, без сжатия)**\n└ _Скачайте файл, чтобы рассмотреть микродетали без артефактов._",
+            caption=t["png_caption"],
             parse_mode='Markdown'
         )
         
         buf_jpeg.close()
         buf_png.close()
-        
         stats.log_generation(chat_id, gen_type, random_steps)
         
     except TimeoutError:
@@ -1571,40 +1856,44 @@ def send_fractal(message):
             safe_api_call(
                 bot.send_message, 
                 chat_id, 
-                "⚠️ **Вычисления прерваны по таймауту (2 минуты).**\n\n"
-                "Генерируемое уравнение оказалось слишком ресурсоемким. "
-                "Сессия была перезапущена во избежание перегрузки сервера.",
-                reply_markup=get_main_keyboard(chat_id)
+                t["timeout_error"],
+                reply_markup=get_main_keyboard(chat_id, lang)
             )
         except Exception:
             pass
     except telebot.apihelper.ApiTelegramException as te:
         if te.error_code in [403, 400]:
-            log("WARN", "TELEGRAM", f"Пользователь {chat_id} заблокировал бота. Удаление подписки.")
+            log("WARN", "TELEGRAM", f"Пользователь {chat_id} заблокировал бота.")
             remove_subscriber(chat_id)
             stats.set_user_inactive(chat_id)
     except Exception as e:
         log("ERROR", "TELEGRAM", f"Сбой отправки: {e}")
         try:
-            safe_api_call(bot.send_message, chat_id, f"❌ Произошел сбой при генерации фрактала: {str(e)}", reply_markup=get_main_keyboard(chat_id))
+            safe_api_call(bot.send_message, chat_id, t["gen_error"].format(error=str(e)), reply_markup=get_main_keyboard(chat_id, lang))
         except Exception:
             pass
     finally:
         user_manager.end_job(chat_id)
 
-@bot.message_handler(func=lambda message: message.text in ["🧿 Запустить бесконечный поток", "⏳ Остановить бесконечный поток"])
+@bot.message_handler(func=lambda message: message.text in [
+    "🧿 Запустить бесконечный поток", "🧿 Start Infinite Stream",
+    "⏳ Остановить бесконечный поток", "⏳ Stop Infinite Stream"
+])
 @bot.message_handler(commands=['subscribe', 'unsubscribe'])
 def toggle_subscription(message):
     chat_id = message.chat.id
+    lang = get_user_lang(message)
+    t = TRANSLATIONS[lang]
+    
     try:
-        if "Запустить" in message.text or message.text == "/subscribe":
+        if "Запустить" in message.text or "Start" in message.text or message.text == "/subscribe":
             save_subscriber(chat_id)
             stats.log_subscription(chat_id, "subscribe")
             safe_api_call(
                 bot.send_message,
                 chat_id, 
-                "👁‍⚙ **Поток запущен.**\n\nКаждые два часа математическое ядро будет автоматически проецировать новую случайную структуру высокой точности.",
-                reply_markup=get_main_keyboard(chat_id)
+                t["sub_started"],
+                reply_markup=get_main_keyboard(chat_id, lang)
             )
         else:
             remove_subscriber(chat_id)
@@ -1612,51 +1901,51 @@ def toggle_subscription(message):
             safe_api_call(
                 bot.send_message, 
                 chat_id, 
-                "⏳ **Поток приостановлен.**\n\nБесконечность отпускает вас... до следующего ручного погружения.",
-                reply_markup=get_main_keyboard(chat_id)
+                t["sub_stopped"],
+                reply_markup=get_main_keyboard(chat_id, lang)
             )
     except Exception as e:
         log("ERROR", "TELEGRAM", f"Ошибка изменения подписки {chat_id}: {e}")
 
-@bot.message_handler(func=lambda message: message.text.startswith("🔮 Сгенерировать пакет"))
+@bot.message_handler(func=lambda message: message.text.startswith("🔮 Сгенерировать пакет") or message.text.startswith("🔮 Generate Batch"))
 def send_batch_fractal(message):
     chat_id = message.chat.id
     username = message.from_user.username or "NoUsername"
-    num = 5 if "5" in message.text else 3
+    lang = get_user_lang(message)
+    t = TRANSLATIONS[lang]
     
-    # Логирование старта пакетной обработки
-    log("INFO", "TELEGRAM", f"Пользователь {chat_id} (@{username}) запросил пакет из {num} фракталов")
+    num = 5 if "5" in message.text else 3
     
     status, val = user_manager.try_start_job(chat_id)
     if status == "busy":
         try:
-            safe_api_call(bot.send_message, chat_id, "⚠️ Идет рендеринг предыдущего пакета. Пожалуйста, подождите.")
+            safe_api_call(bot.send_message, chat_id, t["busy"])
         except Exception:
             pass
         return
     elif status == "cooldown":
         try:
-            safe_api_call(bot.send_message, chat_id, f"⏳ Система охлаждается. Попробуйте снова через {val:.1f} сек.")
+            safe_api_call(bot.send_message, chat_id, t["cooldown"].format(val=val))
         except Exception:
             pass
         return
 
     try:
-        # Считываем сохраненный режим глубины из настроек пользователя
         zoom_mode = get_user_setting(chat_id, "zoom_mode", "shallow")
         if zoom_mode == "deep":
             steps_min, steps_max = 15, 30
-            mode_desc = "Сверхглубокий зум"
+            mode_desc = "Сверхглубокий зум" if lang == "ru" else "Deep Zoom"
         else:
             steps_min, steps_max = 4, 10
-            mode_desc = "Малые расстояния"
+            mode_desc = "Малые расстояния" if lang == "ru" else "Shallow Zoom"
             
         status_msg = safe_api_call(
             bot.send_message, 
             chat_id, 
-            f"🧬 Инициация пакетного рендеринга ({num} проекций).\nРежим масштабирования: **{mode_desc}**.\nРасчёты проводятся последовательно."
+            t["batch_init"].format(num=num, mode=mode_desc),
+            parse_mode='Markdown'
         )
-        log("INFO", "TELEGRAM", f"Пользователь {chat_id} запросил пакет из {num} фракталов (режим: {zoom_mode}).")
+        log("INFO", "TELEGRAM", f"Пользователь {chat_id} (@{username}) запросил пакет из {num} фракталов (режим: {zoom_mode}).")
         
         updater = ProgressUpdater(bot, chat_id, status_msg.message_id)
         generated = 0
@@ -1667,15 +1956,33 @@ def send_batch_fractal(message):
             
             for attempt in range(1, max_attempts + 1):
                 random_steps = random.randint(steps_min, steps_max)
+                
+                # Локализуем callback прогресс-бара внутри пакета
                 def make_batch_callback(index, att):
                     return lambda text: updater.update(
-                        f"🪐 *Фрактал {index+1} из {num}*\n"
-                        f"└ Попытка {att}/{max_attempts}: {text}"
+                        t["batch_step"].format(
+                            index=index+1, 
+                            num=num, 
+                            attempt=att, 
+                            max_attempts=max_attempts, 
+                            text=(
+                                t["vectors"] if "векторов" in text else
+                                t["zoom_position"].format(step=re.findall(r'\d+', text)[0], steps=random_steps) if "Позиционирование" in text else
+                                t["check_aesthetic"] if "эстетического" in text else
+                                t["rendering_high"].format(res=1600 if (HAS_TORCH and DEVICE.type == 'cuda') else 1200) if "Рендеринг" in text else text
+                            )
+                        ),
+                        force=True
                     )
                 
                 updater.update(
-                    f"🪐 *Фрактал {i+1} из {num}*\n"
-                    f"└ Попытка {attempt}/{max_attempts}: Расчёт координат...",
+                    t["batch_step"].format(
+                        index=i+1, 
+                        num=num, 
+                        attempt=attempt, 
+                        max_attempts=max_attempts, 
+                        text=t["vectors"]
+                    ),
                     force=True
                 )
                 
@@ -1689,7 +1996,7 @@ def send_batch_fractal(message):
                     log("WARN", "TIMEOUT", f"Пакет: Фрактал {i+1} на попытке {attempt} прерван по таймауту.")
                     if attempt == max_attempts:
                         break
-                    updater.update(f"⚠️ *Фрактал {i+1} из {num}* (Таймаут). Пересчет сингулярности...", force=True)
+                    updater.update(t["timeout_retry"].format(attempt=attempt, max_attempts=max_attempts), force=True)
                     time.sleep(1.0)
                     continue
                 
@@ -1697,8 +2004,13 @@ def send_batch_fractal(message):
                     break
                 else:
                     updater.update(
-                        f"⚠️ *Фрактал {i+1} из {num}* (Попытка {attempt} отклонена)\n"
-                        f"└ _Пересчет сингулярности..._",
+                        t["batch_step"].format(
+                            index=i+1, 
+                            num=num, 
+                            attempt=attempt, 
+                            max_attempts=max_attempts, 
+                            text=t["unstable_chaos"]
+                        ),
                         force=True
                     )
                     time.sleep(1.0)
@@ -1709,14 +2021,11 @@ def send_batch_fractal(message):
                     safe_send_photo(
                         chat_id,
                         buf_jpeg,
-                        caption=(
-                            f"✨ **Фрактальный слой #{i+1}**\n\n"
-                            f"Уравнение эволюции:\n`{formula}`\n\n"
-                            f"Координаты:\n"
-                            f"`xmin = {coords['xmin']:.8f}`\n"
-                            f"`xmax = {coords['xmax']:.8f}`\n"
-                            f"`ymin = {coords['ymin']:.8f}`\n"
-                            f"`ymax = {coords['ymax']:.8f}`"
+                        caption=t["batch_ready"].format(
+                            index=i+1,
+                            formula=formula,
+                            xmin=coords['xmin'], xmax=coords['xmax'],
+                            ymin=coords['ymin'], ymax=coords['ymax']
                         ),
                         parse_mode='Markdown'
                     )
@@ -1741,20 +2050,19 @@ def send_batch_fractal(message):
             pass
             
         if generated == 0:
-            safe_api_call(bot.send_message, chat_id, "❌ Не удалось пробиться сквозь хаос. Проекции не построены.", reply_markup=get_main_keyboard(chat_id))
+            safe_api_call(bot.send_message, chat_id, t["batch_failed"], reply_markup=get_main_keyboard(chat_id, lang))
         else:
-            safe_api_call(bot.send_message, chat_id, "🔮 **Пакетный перенос завершен.** Все проекции визуализированы.", reply_markup=get_main_keyboard(chat_id))
+            safe_api_call(bot.send_message, chat_id, t["batch_success"], reply_markup=get_main_keyboard(chat_id, lang))
             stats.log_generation(chat_id, f"batch_{zoom_mode}", num)
             
     except Exception as e:
         log("ERROR", "TELEGRAM", f"Критическая ошибка пакетной генерации {chat_id}: {e}")
         try:
-            safe_api_call(bot.send_message, chat_id, f"❌ Произошел сбой при генерации пакета: {str(e)}", reply_markup=get_main_keyboard(chat_id))
+            safe_api_call(bot.send_message, chat_id, t["gen_error"].format(error=str(e)), reply_markup=get_main_keyboard(chat_id, lang))
         except Exception:
             pass
     finally:
         user_manager.end_job(chat_id)
-
 
 # --- Админ-панель для визуализации аналитики ---
 @bot.message_handler(commands=['admin_stats'])
