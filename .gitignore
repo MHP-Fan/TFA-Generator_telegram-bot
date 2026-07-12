@@ -1,15 +1,28 @@
-# Файлы конфигурации и токены (Секретные данные)
+# Файлы конфигурации и секретные токены
 .env
 config.json
+*.env.*
+instance/
 
-# База данных подписчиков и временные файлы статуса
+# Конфиденциальные данные пользователей, настройки и состояние бота
 subscribers.txt
+user_settings.json
+broadcast_state.json
 last_seen.txt
+
+# Базы данных (исключает bot_stats.db, логи подписок и временные файлы блокировок SQLite)
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
 
 # Окружение Python
 .venv/
 venv/
 ENV/
+.env/
 pyvenv.cfg
 
 # Кэш Python
@@ -27,7 +40,7 @@ pyvenv.cfg
 *.sln
 *.swp
 
-# Временные файлы графиков
+# Временные файлы графиков и экспортируемые фракталы
 *.png
 *.jpeg
 *.jpg
