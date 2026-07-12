@@ -44,12 +44,19 @@ class StatsManager:
                     action TEXT
                 )
             """)
+            # Вот этот блок обязательно должен присутствовать:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS broadcast_deliveries (
                     epoch INTEGER,
                     chat_id INTEGER,
                     timestamp TEXT,
                     PRIMARY KEY (epoch, chat_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS system_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
                 )
             """)
             conn.commit()
@@ -75,6 +82,28 @@ class StatsManager:
             cursor.execute(
                 "INSERT OR IGNORE INTO broadcast_deliveries (epoch, chat_id, timestamp) VALUES (?, ?, ?)",
                 (int(epoch), int(chat_id), now_str)
+            )
+            conn.commit()
+            conn.close()
+
+    def get_system_state(self, key, default=None):
+        with self.lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM system_state WHERE key = ?", (key,))
+            res = cursor.fetchone()
+            conn.close()
+            if res:
+                return res[0]
+            return default
+
+    def set_system_state(self, key, value):
+        with self.lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)",
+                (key, str(value))
             )
             conn.commit()
             conn.close()

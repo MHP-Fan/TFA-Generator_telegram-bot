@@ -70,6 +70,19 @@ def get_main_keyboard(chat_id, lang="ru"):
     return markup
 
 # --- Handlers ---
+# Перехват сообщений в режиме офлайн (для всех, кроме администратора)
+@bot.message_handler(func=lambda message: stats.get_system_state("status", "online") == "offline" and message.chat.id != ADMIN_ID)
+def handle_offline_mode(message):
+    try:
+        lang = get_user_lang(message)
+        if lang == "ru":
+            msg_text = "⚙️ *Бот временно отключен администратором на техническое обслуживание.*"
+        else:
+            msg_text = "⚙️ *The bot is temporarily disabled by the administrator for technical maintenance.*"
+        safe_api_call(bot.send_message, message.chat.id, msg_text, parse_mode='Markdown')
+    except Exception as e:
+        log("ERROR", "TELEGRAM", f"Ошибка отправки сообщения об офлайне: {e}")
+
 @bot.message_handler(commands=['start', 'help', 'restart'])
 def send_welcome(message):
     try:
@@ -625,6 +638,43 @@ def send_batch_fractal(message):
         user_manager.end_job(chat_id)
 
 # --- Админ панель ---
+@bot.message_handler(commands=['admin_shutdown', 'admin_offline'])
+def handle_admin_shutdown(message):
+    if message.chat.id != ADMIN_ID:
+        return 
+        
+    try:
+        log("WARN", "SYSTEM", f"Администратор {message.chat.id} инициировал отключение бота.")
+        safe_api_call(bot.send_message, ADMIN_ID, "⚠️ *Инициировано принудительное отключение бота...*", parse_mode='Markdown')
+        
+        # 1. Установка статуса 'offline' в базе данных
+        stats.set_system_state("status", "offline")
+        
+        # 2. Обновление короткого описания в Telegram
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/setMyShortDescription",
+                json={"short_description": "🔴 Вне сети. Сервер временно отключен на техническое обслуживание."},
+                timeout=5
+            )
+            log("SUCCESS", "SYSTEM", "Описание бота успешно изменено на 'Офлайн' в Telegram API.")
+        except Exception as e:
+            log("ERROR", "SYSTEM", f"Не удалось обновить статус короткого описания: {e}")
+            
+        # 3. Отправка финального сообщения администратору
+        safe_api_call(bot.send_message, ADMIN_ID, "✅ *Бот переведен в статус OFFLINE. Процесс завершается.*", parse_mode='Markdown')
+        
+        # 4. Сброс логов на диск
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        # 5. Остановка пуллинга и завершение работы
+        bot.stop_polling()
+        sys.exit(0)
+    except Exception as e:
+        log("ERROR", "SYSTEM", f"Ошибка при выполнении отключения бота: {e}")
+        safe_api_call(bot.send_message, ADMIN_ID, f"❌ Ошибка отключения: {e}")
+
 @bot.message_handler(commands=['admin_stats'])
 def send_admin_report(message):
     if message.chat.id != ADMIN_ID:
@@ -703,6 +753,7 @@ if __name__ == "__main__":
             json={"short_description": "🟢 В сети. Нажмите /start, чтобы раствориться в бездне."},
             timeout=10
         )
+        stats.set_system_state("status", "online")
         log("INFO", "SYSTEM", "Статус бота успешно переведен в 'Онлайн'.")
     except Exception as e:
         log("ERROR", "SYSTEM", f"Не удалось обновить статус: {e}")

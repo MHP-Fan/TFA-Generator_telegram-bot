@@ -52,7 +52,7 @@ def run_broadcast_distribution(epoch):
     buf_jpeg, buf_png, formula, coords = None, None, None, None
     
     try:
-        # 1. Основной цикл генерации
+        # 1. Основной цикл генерации (высокое качество)
         for attempt in range(1, 16):
             try:
                 buf_jpeg, buf_png, formula, coords = generate_fractal_pipeline(
@@ -68,10 +68,10 @@ def run_broadcast_distribution(epoch):
             except Exception as e:
                 log("ERROR", "AUTO", f"Сбой пайплайна на попытке {attempt}: {e}")
                 
-        # 2. Резервный цикл генерации
+        # 2. Резервный цикл генерации (среднее качество)
         if buf_jpeg is None:
             log("WARN", "AUTO", "Запуск резервного режима рассылки с мягкими лимитами...")
-            for attempt in range(1, 6):
+            for attempt in range(1, 11):
                 try:
                     buf_jpeg, buf_png, formula, coords = generate_fractal_pipeline(
                         quality_res=1200,  
@@ -86,26 +86,62 @@ def run_broadcast_distribution(epoch):
                 except Exception as e:
                     log("ERROR", "AUTO", f"Сбой в резервном режиме на попытке {attempt}: {e}")
                     
-        # 3. Гарантированный спасательный круг (Fallback): красивый кастомный фрагтал Мандельброта
+        # 3. Бесконечный поиск (до победного конца): генерация СЛУЧАЙНЫХ фракталов
+        # Вместо отправки фиксированного шаблона Mandelbrot, мы циклически подбираем случайный фрактал из набора красивых зон,
+        # индивидуально варьируя координаты и масштабирование, пока не получим успешный результат.
         if buf_jpeg is None:
-            log("WARN", "AUTO", "Процедурный поиск не дал результатов. Активация Fallback...")
-            try:
-                fallback_rpn = parse_infix_to_rpn("(Z^2) + C")
-                xmin, xmax, ymin, ymax = -0.7436438870371587, -0.7436438870371587 + 0.00000000005, 0.1318259042053119 - 0.000000000025, 0.1318259042053119 + 0.000000000025
-                
-                final_img, _, _ = safe_compute_grid(
-                    xmin, xmax, ymin, ymax, 1200, 1200, 500, fallback_rpn, False, 0j, use_double=True
-                )
-                processed_img = apply_adaptive_tonemapping(final_img, 500)
-                if processed_img is None:
-                    processed_img = np.nan_to_num(final_img)
+            log("WARN", "AUTO", "Процедурный поиск не дал результатов. Переход к генерации случайного фрактала до победного...")
+            
+            FALLBACK_TEMPLATES = [
+                {"formula": "(Z^2) + C", "x": -0.7436438870371587, "y": 0.1318259042053119, "r": 0.0015, "max_iter": 500},
+                {"formula": "(Z^2) + C", "x": -1.25, "y": 0.0, "r": 0.04, "max_iter": 400},
+                {"formula": "(Z^2) + C", "x": -0.16, "y": 1.03, "r": 0.02, "max_iter": 400},
+                {"formula": "(Z^3) + C", "x": -0.5, "y": 0.5, "r": 0.1, "max_iter": 350},
+                {"formula": "(Z^3) + C", "x": 0.0, "y": 0.0, "r": 0.8, "max_iter": 300},
+                {"formula": "Z^4 + C", "x": 0.0, "y": 0.0, "r": 0.7, "max_iter": 300},
+                {"formula": "cos(Z) + C", "x": 0.0, "y": 0.0, "r": 1.2, "max_iter": 250},
+                {"formula": "Z^2 + sin(C)", "x": -0.5, "y": 0.0, "r": 0.8, "max_iter": 300}
+            ]
+            
+            attempt = 0
+            while buf_jpeg is None:
+                attempt += 1
+                log("INFO", "AUTO", f"Попытка генерации случайного фрактала #{attempt}...")
+                try:
+                    # Случайный выбор шаблона
+                    template = random.choice(FALLBACK_TEMPLATES)
+                    formula = template["formula"]
+                    max_iter = template["max_iter"]
                     
-                buf_jpeg, buf_png = export_to_buffers_pil(processed_img, CLASSIC_CMAP, target_res=1200)
-                formula = "(Z^2) + C"
-                coords = {"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax}
-                log("SUCCESS", "AUTO", "Стабильный резервный фрактал успешно материализован.")
-            except Exception as fallback_err:
-                log("CRITICAL", "AUTO", f"Даже резервный фрактал не удалось построить: {fallback_err}")
+                    # Случайный зум в диапазоне от 50% до 150% от базового радиуса
+                    r = template["r"] * random.uniform(0.5, 1.5)
+                    # Случайное смещение в пределах 15% от радиуса для уникальности
+                    cx = template["x"] + random.uniform(-template["r"], template["r"]) * 0.15
+                    cy = template["y"] + random.uniform(-template["r"], template["r"]) * 0.15
+                    
+                    xmin, xmax = cx - r, cx + r
+                    ymin, ymax = cy - r, cy + r
+                    
+                    fallback_rpn = parse_infix_to_rpn(formula)
+                    
+                    final_img, _, _ = safe_compute_grid(
+                        xmin, xmax, ymin, ymax, 1200, 1200, max_iter, fallback_rpn, False, 0j, use_double=True
+                    )
+                    processed_img = apply_adaptive_tonemapping(final_img, max_iter)
+                    if processed_img is None:
+                        processed_img = np.nan_to_num(final_img)
+                        
+                    buf_jpeg, buf_png = export_to_buffers_pil(processed_img, CLASSIC_CMAP, target_res=1200)
+                    coords = {"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax}
+                    
+                    if buf_jpeg is not None:
+                        log("SUCCESS", "AUTO", f"Уникальный случайный фрактал '{formula}' успешно сгенерирован на попытке #{attempt}.")
+                        break
+                except Exception as fallback_err:
+                    log("ERROR", "AUTO", f"Сбой генерации случайного фрактала на попытке #{attempt}: {fallback_err}")
+                
+                # Небольшая пауза для разгрузки системы перед новой попыткой
+                time.sleep(1.0)
 
         if buf_jpeg is None:
             log("ERROR", "AUTO", "Критический сбой генерации рассылки. Отправка уведомлений о задержке...")

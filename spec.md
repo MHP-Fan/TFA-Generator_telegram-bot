@@ -1,4 +1,4 @@
-# ARCHITECTURAL BLUEPRINT: FRACTAL NAVIGATOR BOT
+# ARCHITECTURAL SPECIFICATION: FRACTAL NAVIGATOR BOT
 
 ## 1. Global Infrastructure & State
 * **Execution Devices (`config`):** `HAS_TORCH` (bool), `DEVICE` (cuda/cpu). CUDA is pre-warmed on `MainThread` to prevent deadlocks.
@@ -17,6 +17,7 @@
 * `generations`: `id` (AI, PK), `chat_id` (INT), `timestamp` (TEXT), `gen_type` (TEXT), `steps` (INT).
 * `subscriptions`: `id` (AI, PK), `chat_id` (INT), `timestamp` (TEXT), `action` (TEXT).
 * `broadcast_deliveries`: `epoch` (INT), `chat_id` (INT), `timestamp` (TEXT) -> Composite PK `(epoch, chat_id)` to prevent duplicates.
+* `system_state`: `key` (PK, TEXT), `value` (TEXT) -> Custom system-wide variables (e.g., `"status": "online" | "offline"`).
 
 ## 3. Math & Parser Engine (RPN)
 * **Tokens:** Variables (`VAR_Z=0`, `VAR_C=1`), Constants (`CONST=2`), Unary (`OP_SIN=8`, `OP_COS=9`... up to `OP_SIGM=15`), Binary (`OP_ADD=3`... `OP_POW=7`).
@@ -50,5 +51,16 @@ User Request -> Cooldown/Concurrency Check (UserManager) -> Random Steps Selecti
 * Runs in background thread. Interval: 7200 seconds (2 hours).
 * Compares current epoch with `last_broadcast_epoch`.
 * If true, triggers `run_broadcast_distribution(epoch)`:
-  * Generates a high-quality fractal (max 15 attempts, fallback to simplified parameters on failure, ultimate fallback to beautiful Mandelbrot coordinates if all else fails).
-  * Distributes to subscribers sequentially. Marks delivery in `broadcast_deliveries` (blocks duplicates). Automatically unsubscribes users who blocked the bot (API 403/400).
+  * **Tier 1 (High Quality):** Tries 15 attempts of `generate_fractal_pipeline` with resolution 1600 and 10 steps.
+  * **Tier 2 (Medium Quality / Soft Limits):** Tries 10 attempts of `generate_fractal_pipeline` with resolution 1200 and 5 steps.
+  * **Tier 3 (Dynamic Randomized Fallback):** If procedural search fails, enters an active loop that picks a random beautiful base hotspot template (e.g., standard Mandelbrot, custom power, trigonometric structures), applies slight coordinate jitter and random zoom factor scaling to guarantee absolute mathematical uniqueness, and renders it directly. It loops until a valid image is successfully created.
+  * **Distribution:** Distributes sequentially to subscribers. Marks delivery in `broadcast_deliveries` (preventing duplicates). Automatically removes users who blocked the bot (Telegram API errors 403/400).
+
+### C. Admin Control & Graceful Offline Shutdown
+* **Status Filtering Middleware/Handler:** A primary handler registered before any user action, blocking message handling if `status` is `"offline"` in `system_state`. Admin is bypassed.
+* **Command `/admin_shutdown` / `/admin_offline`:** 
+  1. Writes `"offline"` to database `system_state`.
+  2. Updates short description via Telegram API (🔴 Вне сети).
+  3. Stops network polling via `bot.stop_polling()`.
+  4. Exits process with code 0.
+* **Auto-Recovery on Restart:** On process entry (`__main__`), state is reset to `"online"` in `system_state` and Telegram short description is set to "🟢 В сети".
